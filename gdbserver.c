@@ -7,11 +7,18 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/wait.h>
+#include <sys/user.h>
+#include <sys/ptrace.h>
 
+int reg_map[] = {10, 5, 11, 12, 13, 14, 4, 19, 9, 8, 7, 6, 3, 2, 1, 0, 16, 18, 17, 20, 23, 24, 25, 26};
+int reg_size[] = {8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4};
 uint8_t inbuf[32768];
 uint8_t outbuf[32768];
 int inbufpos;
 int outbufpos;
+int pid;
+int stat_loc;
 
 int poll_socket(int sock_fd, short events)
 {
@@ -125,6 +132,19 @@ void write_flush(int sock_fd)
   }
   outbufpos = 0;
 }
+
+void process_xfer(const char *name, char *args)
+{
+
+  const char *mode = args;
+  args = strchr(args, ':');
+  *args++ = '\0';
+  if (!strcmp(name, "features") && !strcmp(mode, "read"))
+  {
+    write_packet("l<target version=\"1.0\"><architecture>i386:x86-64</architecture></target>");
+  }
+}
+
 void process_query(char *payload)
 {
   const char *name;
@@ -141,9 +161,17 @@ void process_query(char *payload)
   if (!strcmp(name, "Attached"))
     write_packet("1");
   if (!strcmp(name, "Supported"))
-    write_packet("PacketSize=32768");
+    write_packet("PacketSize=32768;qXfer:features:read+");
   if (!strcmp(name, "TStatus"))
     write_packet("");
+  if (!strcmp(name, "Xfer"))
+  {
+    name = args;
+    args = strchr(args, ':');
+    *args++ = '\0';
+
+    return process_xfer(name, args);
+  }
   if (!strcmp(name, "fThreadInfo"))
     write_packet("m1234");
   if (!strcmp(name, "sThreadInfo"))
@@ -161,6 +189,10 @@ void process_vpacket(char *payload)
     *args++ = '\0';
   }
   name = payload;
+  if (!strcmp("Cont?", name))
+  {
+    write_packet("");
+  }
   if (!strcmp("MustReplyEmpty", name))
   {
     write_packet("");
@@ -182,12 +214,20 @@ void process_packet()
     checksum += inbuf[i];
   snprintf(checksum_str, 3, "%02lx", checksum);
   assert(!strncmp(checksum_str, inbuf + packetend + 1, 2));
+  struct user_regs_struct regs;
 
-  unsigned int maddr, mlen;
+  unsigned long long maddr, mlen, mdata;
+  uint8_t tmpbuf[400];
+  int i, j;
+
   switch (request)
   {
   case 'g':
-    write_packet("00000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+    for (i = 0; i < 24; i++)
+      for (j = 0; j < reg_size[i]; j++)
+        snprintf(tmpbuf + 16 * i + 2 * j, 3, "%02x", ((uint8_t *)&regs)[reg_map[i] * 8 + j]);
+    write_packet(tmpbuf);
     break;
   case 'H':
     write_packet("OK");
@@ -197,16 +237,33 @@ void process_packet()
     assert(',' == *payload++);
     mlen = strtoul(payload, &payload, 16);
     assert('\0' == *payload);
-    write_packet("aa");
+    mdata = ptrace(PTRACE_PEEKDATA, pid, maddr, NULL);
+    for (i = 0; i < mlen; i++)
+      snprintf(tmpbuf + i * 2, 3, "%02x", ((uint8_t *)&mdata)[i]);
+    write_packet(tmpbuf);
+    break;
+  case 'p':
+    i = strtol(payload, NULL, 16);
+    mdata = ptrace(PTRACE_PEEKUSER, pid, 8 * reg_map[i], NULL);
+    for (j = 0; j < reg_size[i]; j++)
+      snprintf(tmpbuf + 2 * j, 3, "%02x", ((uint8_t *)&mdata)[j]);
+    write_packet(tmpbuf);
     break;
   case 'q':
     process_query(payload);
+    break;
+  case 's':
+    ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+    wait(&stat_loc);
+    snprintf(tmpbuf, 4, "S%02d", WEXITSTATUS(stat_loc));
+    write_packet(tmpbuf);
     break;
   case 'v':
     process_vpacket(payload);
     break;
   case '?':
-    write_packet("S05");
+    snprintf(tmpbuf, 4, "S%02d", WEXITSTATUS(stat_loc));
+    write_packet(tmpbuf);
     break;
   }
 
@@ -266,8 +323,19 @@ void start_server()
   get_request(sock_fd);
 }
 
-int main()
+int main(int argc, char *argv[])
 {
-  start_server();
+  pid = fork();
+  char *prog = argv[1];
+  if (pid == 0)
+  {
+    ptrace(PTRACE_TRACEME, 0, NULL, NULL);
+    execl(prog, prog, NULL);
+  }
+  else if (pid >= 1)
+  {
+    wait(&stat_loc);
+    start_server();
+  }
   return 0;
 }
