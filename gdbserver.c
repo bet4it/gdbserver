@@ -7,9 +7,12 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/wait.h>
 #include <sys/user.h>
 #include <sys/ptrace.h>
+
+static const char INTERRUPT_CHAR = '\x03';
 
 int reg_map[] = {10, 5, 11, 12, 13, 14, 4, 19, 9, 8, 7, 6, 3, 2, 1, 0, 16, 18, 17, 20, 23, 24, 25, 26};
 int reg_size[] = {8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4};
@@ -46,38 +49,6 @@ int poll_outgoing(int sock_fd)
   return poll_socket(sock_fd, POLLOUT);
 }
 
-void read_data_once(int sock_fd)
-{
-  int ret;
-  ssize_t nread;
-  uint8_t buf[4096];
-
-  poll_incoming(sock_fd);
-  nread = read(sock_fd, buf, sizeof(buf));
-  if (nread <= 0)
-  {
-    puts("Connection closed");
-    exit(0);
-  }
-  if (inbufpos + nread >= sizeof(inbuf))
-  {
-    puts("Read buffer overflow");
-    exit(-2);
-  }
-  memcpy(inbuf + inbufpos, buf, nread);
-  inbufpos += nread;
-}
-
-void read_packet(int sock_fd)
-{
-  while (1)
-  {
-    read_data_once(sock_fd);
-    if (memchr(inbuf, '#', inbufpos))
-      break;
-  }
-}
-
 void write_data_raw(const uint8_t *data, ssize_t len)
 {
   assert(outbufpos + len < sizeof(outbuf));
@@ -99,7 +70,6 @@ void write_packet_bytes(const uint8_t *data, size_t num_bytes)
   uint8_t checksum;
   size_t i;
 
-  write_data_raw((uint8_t *)"+", 1);
   write_data_raw((uint8_t *)"$", 1);
   for (i = 0, checksum = 0; i < num_bytes; ++i)
   {
@@ -133,9 +103,63 @@ void write_flush(int sock_fd)
   outbufpos = 0;
 }
 
+void read_data_once(int sock_fd)
+{
+  int ret;
+  ssize_t nread;
+  uint8_t buf[4096];
+
+  poll_incoming(sock_fd);
+  nread = read(sock_fd, buf, sizeof(buf));
+  if (nread <= 0)
+  {
+    puts("Connection closed");
+    exit(0);
+  }
+  if (inbufpos + nread >= sizeof(inbuf))
+  {
+    puts("Read buffer overflow");
+    exit(-2);
+  }
+  memcpy(inbuf + inbufpos, buf, nread);
+  inbufpos += nread;
+}
+
+int skip_to_packet_start()
+{
+  ssize_t end = -1;
+  for (size_t i = 0; i < inbufpos; ++i)
+  {
+    if (inbuf[i] == '$' || inbuf[i] == INTERRUPT_CHAR)
+    {
+      end = i;
+      break;
+    }
+  }
+
+  if (end < 0)
+  {
+    inbufpos = 0;
+    return 0;
+  }
+  memmove(inbuf, inbuf + end, inbufpos - end);
+  inbufpos -= end;
+
+  assert(1 <= inbufpos);
+  assert('$' == inbuf[0] || INTERRUPT_CHAR == inbuf[0]);
+  return 1;
+}
+
+void read_packet(int sock_fd)
+{
+  while (!skip_to_packet_start())
+    read_data_once(sock_fd);
+  write_data_raw((uint8_t *)"+", 1);
+  write_flush(sock_fd);
+}
+
 void process_xfer(const char *name, char *args)
 {
-
   const char *mode = args;
   args = strchr(args, ':');
   *args++ = '\0';
@@ -199,18 +223,29 @@ void process_vpacket(char *payload)
   }
 }
 
+void prepare_resume_reply(uint8_t *buf)
+{
+
+  if (WIFEXITED(stat_loc))
+    sprintf(buf, "W%02x", WEXITSTATUS(stat_loc));
+  if (WIFSTOPPED(stat_loc))
+    sprintf(buf, "S%02x", WSTOPSIG(stat_loc));
+  // if (WIFSIGNALED(stat_loc))
+  //   sprintf(buf, "T%02x", WTERMSIG(stat_loc));
+}
+
 void process_packet()
 {
   uint8_t *p = (uint8_t *)memchr(inbuf, '#', inbufpos);
   int packetend = p - inbuf;
-  assert(inbuf[0] == '+' && inbuf[1] == '$');
-  char request = inbuf[2];
-  char *payload = (char *)&inbuf[3];
+  assert(inbuf[0] == '$');
+  char request = inbuf[1];
+  char *payload = (char *)&inbuf[2];
   inbuf[packetend] = '\0';
 
   uint8_t checksum = 0;
   uint8_t checksum_str[3];
-  for (int i = 2; i < packetend; i++)
+  for (int i = 1; i < packetend; i++)
     checksum += inbuf[i];
   snprintf(checksum_str, 3, "%02lx", checksum);
   assert(!strncmp(checksum_str, inbuf + packetend + 1, 2));
@@ -222,6 +257,11 @@ void process_packet()
 
   switch (request)
   {
+  case 'c':
+    ptrace(PTRACE_CONT, pid, NULL, NULL);
+    wait(&stat_loc);
+    prepare_resume_reply(tmpbuf);
+    write_packet(tmpbuf);
   case 'g':
     ptrace(PTRACE_GETREGS, pid, NULL, &regs);
     for (i = 0; i < 24; i++)
@@ -255,14 +295,14 @@ void process_packet()
   case 's':
     ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
     wait(&stat_loc);
-    snprintf(tmpbuf, 4, "S%02d", WEXITSTATUS(stat_loc));
+    prepare_resume_reply(tmpbuf);
     write_packet(tmpbuf);
     break;
   case 'v':
     process_vpacket(payload);
     break;
   case '?':
-    snprintf(tmpbuf, 4, "S%02d", WEXITSTATUS(stat_loc));
+    prepare_resume_reply(tmpbuf);
     write_packet(tmpbuf);
     break;
   }
@@ -284,7 +324,7 @@ void get_request(int sock_fd)
 void start_server()
 {
   int ret;
-  int reuseaddr = 1;
+  const int one = 1;
   int listen_fd, sock_fd;
 
   listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -293,8 +333,7 @@ void start_server()
     perror("socket() failed");
     exit(-1);
   }
-  ret = setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr,
-                   sizeof(reuseaddr));
+  ret = setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
   if (ret < 0)
   {
     perror("setsockopt() failed");
@@ -318,6 +357,7 @@ void start_server()
   }
 
   sock_fd = accept(listen_fd, NULL, NULL);
+  ret = setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
   memset(inbuf, 0, sizeof(inbuf));
   inbufpos = 0;
   get_request(sock_fd);
