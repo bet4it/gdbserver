@@ -51,7 +51,7 @@ enum gdb_signal
   {
 #define SET(symbol, constant, name, string) \
     symbol = constant,
-#include "gdb/signals.def"
+#include "signals.def"
 #undef SET
   };
 

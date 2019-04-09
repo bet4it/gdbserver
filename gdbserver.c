@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <sys/user.h>
 #include <sys/ptrace.h>
+#include "gdb_signals.h"
 
 static const char INTERRUPT_CHAR = '\x03';
 
@@ -227,11 +228,11 @@ void prepare_resume_reply(uint8_t *buf)
 {
 
   if (WIFEXITED(stat_loc))
-    sprintf(buf, "W%02x", WEXITSTATUS(stat_loc));
+    sprintf(buf, "W%02x", gdb_signal_from_host(WEXITSTATUS(stat_loc)));
   if (WIFSTOPPED(stat_loc))
-    sprintf(buf, "S%02x", WSTOPSIG(stat_loc));
+    sprintf(buf, "S%02x", gdb_signal_from_host(WSTOPSIG(stat_loc)));
   // if (WIFSIGNALED(stat_loc))
-  //   sprintf(buf, "T%02x", WTERMSIG(stat_loc));
+  //   sprintf(buf, "T%02x", gdb_signal_from_host(WTERMSIG(stat_loc)));
 }
 
 void process_packet()
@@ -262,6 +263,7 @@ void process_packet()
     wait(&stat_loc);
     prepare_resume_reply(tmpbuf);
     write_packet(tmpbuf);
+    break;
   case 'g':
     ptrace(PTRACE_GETREGS, pid, NULL, &regs);
     for (i = 0; i < 24; i++)

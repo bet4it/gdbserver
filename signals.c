@@ -17,13 +17,22 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
-#include "common-defs.h"
+//#include "common-defs.h"
+#define HAVE_SIGNAL_H 1
+#include <stdio.h>
+#include <string.h>
+#include <assert.h>
 
 #ifdef HAVE_SIGNAL_H
 #include <signal.h>
 #endif
 
 #include "gdb_signals.h"
+
+#define gdb_assert assert
+#define error printf
+#define warning printf
+#define _(String) (String)
 
 struct gdbarch;
 
