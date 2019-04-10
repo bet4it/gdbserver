@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/reg.h>
 #include <sys/wait.h>
 #include <sys/user.h>
 #include <sys/ptrace.h>
@@ -15,14 +16,21 @@
 
 static const char INTERRUPT_CHAR = '\x03';
 
-int reg_map[] = {10, 5, 11, 12, 13, 14, 4, 19, 9, 8, 7, 6, 3, 2, 1, 0, 16, 18, 17, 20, 23, 24, 25, 26};
-int reg_size[] = {8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4};
+uint8_t reg_map[] = {10, 5, 11, 12, 13, 14, 4, 19, 9, 8, 7, 6, 3, 2, 1, 0, 16, 18, 17, 20, 23, 24, 25, 26};
+uint8_t reg_size[] = {8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4};
+uint8_t break_instr[] = {0xcc};
 uint8_t inbuf[32768];
 uint8_t outbuf[32768];
 int inbufpos;
 int outbufpos;
 int pid;
 int stat_loc;
+
+struct debug_breakpoint_t
+{
+  size_t addr;
+  size_t orig_data;
+} breakpoints[10];
 
 int poll_socket(int sock_fd, short events)
 {
@@ -235,11 +243,47 @@ void prepare_resume_reply(uint8_t *buf)
   //   sprintf(buf, "T%02x", gdb_signal_from_host(WTERMSIG(stat_loc)));
 }
 
+int set_breakpoint(int pid, size_t addr, size_t length)
+{
+  int i;
+  for (i = 0; i < 10; i++)
+    if (breakpoints[i].addr == 0)
+    {
+      size_t data = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, NULL);
+      breakpoints[i].orig_data = data;
+      breakpoints[i].addr = addr;
+      assert(sizeof(break_instr) <= length);
+      memcpy((void *)&data, break_instr, sizeof(break_instr));
+      ptrace(PTRACE_POKEDATA, pid, (void *)addr, data);
+      break;
+    }
+  if (i == 10)
+    return -1;
+  else
+    return 0;
+}
+
+int remove_breakpoint(int pid, size_t addr, size_t length)
+{
+  int i;
+  for (i = 0; i < 10; i++)
+    if (breakpoints[i].addr == addr)
+    {
+      ptrace(PTRACE_POKEDATA, pid, (void *)addr, breakpoints[i].orig_data);
+      breakpoints[i].addr = 0;
+      break;
+    }
+  if (i == 10)
+    return -1;
+  else
+    return 0;
+}
+
 void process_packet()
 {
-  uint8_t *p = (uint8_t *)memchr(inbuf, '#', inbufpos);
-  int packetend = p - inbuf;
-  assert(inbuf[0] == '$');
+  uint8_t *packetend_ptr = (uint8_t *)memchr(inbuf, '#', inbufpos);
+  int packetend = packetend_ptr - inbuf;
+  assert('$' == inbuf[0]);
   char request = inbuf[1];
   char *payload = (char *)&inbuf[2];
   inbuf[packetend] = '\0';
@@ -252,9 +296,7 @@ void process_packet()
   assert(!strncmp(checksum_str, inbuf + packetend + 1, 2));
   struct user_regs_struct regs;
 
-  unsigned long long maddr, mlen, mdata;
   uint8_t tmpbuf[400];
-  int i, j;
 
   switch (request)
   {
@@ -266,8 +308,8 @@ void process_packet()
     break;
   case 'g':
     ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-    for (i = 0; i < 24; i++)
-      for (j = 0; j < reg_size[i]; j++)
+    for (int i = 0; i < sizeof(reg_map); i++)
+      for (int j = 0; j < reg_size[i]; j++)
         snprintf(tmpbuf + 16 * i + 2 * j, 3, "%02x", ((uint8_t *)&regs)[reg_map[i] * 8 + j]);
     write_packet(tmpbuf);
     break;
@@ -275,22 +317,76 @@ void process_packet()
     write_packet("OK");
     break;
   case 'm':
+  case 'M':
+  {
+    size_t maddr, mlen, mdata;
     maddr = strtoul(payload, &payload, 16);
     assert(',' == *payload++);
     mlen = strtoul(payload, &payload, 16);
-    assert('\0' == *payload);
-    mdata = ptrace(PTRACE_PEEKDATA, pid, maddr, NULL);
-    for (i = 0; i < mlen; i++)
-      snprintf(tmpbuf + i * 2, 3, "%02x", ((uint8_t *)&mdata)[i]);
+    assert('\0' == *payload++);
+    if (request == 'm')
+    {
+      int i, j;
+      for (i = 0; i < mlen; i += j)
+      {
+        mdata = ptrace(PTRACE_PEEKDATA, pid, maddr, NULL);
+        for (j = 0; j < 8 && i + j < mlen; j++)
+          snprintf(tmpbuf + (i + j) * 2, 3, "%02x", ((uint8_t *)&mdata)[j]);
+        maddr += j;
+      }
+    }
+    else
+    {
+      int i, j;
+      for (i = 0; i < mlen; i += 8)
+      {
+        j = (mlen - i >= 8) ? 8 : (mlen - i);
+        assert(8 == j);
+        memcpy(tmpbuf, payload + i, j);
+        mdata = strtoul(tmpbuf, NULL, 16);
+        ptrace(PTRACE_POKEDATA, pid, maddr + i, mdata);
+      }
+    }
     write_packet(tmpbuf);
     break;
+  }
   case 'p':
-    i = strtol(payload, NULL, 16);
-    mdata = ptrace(PTRACE_PEEKUSER, pid, 8 * reg_map[i], NULL);
-    for (j = 0; j < reg_size[i]; j++)
-      snprintf(tmpbuf + 2 * j, 3, "%02x", ((uint8_t *)&mdata)[j]);
+  {
+    int i = strtol(payload, NULL, 16);
+    if (i > sizeof(reg_map))
+    {
+      write_packet("E01");
+      break;
+    }
+    size_t regdata = ptrace(PTRACE_PEEKUSER, pid, 8 * reg_map[i], NULL);
+    for (int j = 0; j < reg_size[i]; j++)
+      snprintf(tmpbuf + 2 * j, 3, "%02x", ((uint8_t *)&regdata)[j]);
     write_packet(tmpbuf);
     break;
+  }
+  case 'P':
+  {
+    int i = strtol(payload, &payload, 16);
+    assert('=' == *payload++);
+    if (i > sizeof(reg_map) && i != 57)
+    {
+      write_packet("E01");
+      break;
+    }
+    size_t regdata;
+    tmpbuf[2] = '\0';
+    for (int j = 0; j < 8; j++)
+    {
+      strncpy(tmpbuf, payload + j * 2, 2);
+      ((uint8_t *)&regdata)[j] = strtol(tmpbuf, NULL, 16);
+    }
+    if (i == 57)
+      ptrace(PTRACE_POKEUSER, pid, 8 * ORIG_RAX, regdata);
+    else
+      ptrace(PTRACE_POKEUSER, pid, 8 * reg_map[i], regdata);
+    write_packet("OK");
+    break;
+  }
   case 'q':
     process_query(payload);
     break;
@@ -303,6 +399,45 @@ void process_packet()
   case 'v':
     process_vpacket(payload);
     break;
+  case 'X':
+  {
+    size_t maddr, mlen, mdata;
+    maddr = strtoul(payload, &payload, 16);
+    assert(',' == *payload++);
+    mlen = strtoul(payload, &payload, 16);
+    assert(':' == *payload++);
+    assert(mlen <= 8);
+    mdata = ptrace(PTRACE_PEEKDATA, pid, maddr, NULL);
+    memcpy((void *)&mdata, payload, mlen);
+    ptrace(PTRACE_POKEDATA, pid, maddr, mdata);
+    write_packet("OK");
+    break;
+  }
+  case 'z':
+  case 'Z':
+  {
+    int type = strtol(payload, &payload, 16);
+    assert(',' == *payload++);
+    size_t addr = strtoul(payload, &payload, 16);
+    assert(',' == *payload);
+    payload++;
+    size_t length = strtoul(payload, &payload, 16);
+    if (type == 0)
+    {
+      int ret;
+      if (request == 'Z')
+        ret = set_breakpoint(pid, addr, length);
+      else
+        ret = remove_breakpoint(pid, addr, length);
+      if (ret == 0)
+        write_packet("OK");
+      else
+        write_packet("E01");
+    }
+    else
+      write_packet("");
+    break;
+  }
   case '?':
     prepare_resume_reply(tmpbuf);
     write_packet(tmpbuf);
