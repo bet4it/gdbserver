@@ -32,6 +32,44 @@ struct debug_breakpoint_t
   size_t orig_data;
 } breakpoints[10];
 
+static const char hexchars[] = "0123456789abcdef";
+
+int hex(char ch)
+{
+  if ((ch >= 'a') && (ch <= 'f'))
+    return (ch - 'a' + 10);
+  if ((ch >= '0') && (ch <= '9'))
+    return (ch - '0');
+  if ((ch >= 'A') && (ch <= 'F'))
+    return (ch - 'A' + 10);
+  return (-1);
+}
+
+char *mem2hex(char *mem, char *buf, int count)
+{
+  unsigned char ch;
+  for (int i = 0; i < count; i++)
+  {
+    ch = *(mem++);
+    *buf++ = hexchars[ch >> 4];
+    *buf++ = hexchars[ch % 16];
+  }
+  *buf = 0;
+  return (buf);
+}
+
+char *hex2mem(char *buf, char *mem, int count)
+{
+  unsigned char ch;
+  for (int i = 0; i < count; i++)
+  {
+    ch = hex(*buf++) << 4;
+    ch = ch + hex(*buf++);
+    *(mem++) = ch;
+  }
+  return (mem);
+}
+
 int poll_socket(int sock_fd, short events)
 {
   struct pollfd pfd;
@@ -307,12 +345,19 @@ void process_packet()
     write_packet(tmpbuf);
     break;
   case 'g':
+  {
+    uint8_t regbuf[20];
+    tmpbuf[0] = '\0';
     ptrace(PTRACE_GETREGS, pid, NULL, &regs);
     for (int i = 0; i < sizeof(reg_map); i++)
-      for (int j = 0; j < reg_size[i]; j++)
-        snprintf(tmpbuf + 16 * i + 2 * j, 3, "%02x", ((uint8_t *)&regs)[reg_map[i] * 8 + j]);
+    {
+      mem2hex((void *)(((size_t *)&regs) + reg_map[i]), regbuf, reg_size[i]);
+      regbuf[reg_size[i] * 2] = '\0';
+      strcat(tmpbuf, regbuf);
+    }
     write_packet(tmpbuf);
     break;
+  }
   case 'H':
     write_packet("OK");
     break;
@@ -326,28 +371,29 @@ void process_packet()
     assert('\0' == *payload++);
     if (request == 'm')
     {
-      int i, j;
-      for (i = 0; i < mlen; i += j)
+      for (int i = 0; i < mlen; i += 8)
       {
-        mdata = ptrace(PTRACE_PEEKDATA, pid, maddr, NULL);
-        for (j = 0; j < 8 && i + j < mlen; j++)
-          snprintf(tmpbuf + (i + j) * 2, 3, "%02x", ((uint8_t *)&mdata)[j]);
-        maddr += j;
+        mdata = ptrace(PTRACE_PEEKDATA, pid, maddr + i, NULL);
+        mem2hex((void *)&mdata, tmpbuf + i * 2, (mlen - i >= 8 ? 8 : mlen - i));
       }
+      tmpbuf[mlen * 2] = '\0';
+      write_packet(tmpbuf);
     }
     else
     {
-      int i, j;
-      for (i = 0; i < mlen; i += 8)
+      for (int i = 0; i < mlen; i += 8)
       {
-        j = (mlen - i >= 8) ? 8 : (mlen - i);
-        assert(8 == j);
-        memcpy(tmpbuf, payload + i, j);
-        mdata = strtoul(tmpbuf, NULL, 16);
+        if (mlen - i >= 8)
+          hex2mem(payload + i * 2, (void *)&mdata, 8);
+        else
+        {
+          mdata = ptrace(PTRACE_PEEKDATA, pid, maddr + i, NULL);
+          hex2mem(payload + i * 2, (void *)&mdata, mlen - i);
+        }
         ptrace(PTRACE_POKEDATA, pid, maddr + i, mdata);
       }
+      write_packet("OK");
     }
-    write_packet(tmpbuf);
     break;
   }
   case 'p':
@@ -359,8 +405,8 @@ void process_packet()
       break;
     }
     size_t regdata = ptrace(PTRACE_PEEKUSER, pid, 8 * reg_map[i], NULL);
-    for (int j = 0; j < reg_size[i]; j++)
-      snprintf(tmpbuf + 2 * j, 3, "%02x", ((uint8_t *)&regdata)[j]);
+    mem2hex((void *)&regdata, tmpbuf, reg_size[i]);
+    tmpbuf[reg_size[i] * 2] = '\0';
     write_packet(tmpbuf);
     break;
   }
@@ -374,12 +420,7 @@ void process_packet()
       break;
     }
     size_t regdata;
-    tmpbuf[2] = '\0';
-    for (int j = 0; j < 8; j++)
-    {
-      strncpy(tmpbuf, payload + j * 2, 2);
-      ((uint8_t *)&regdata)[j] = strtol(tmpbuf, NULL, 16);
-    }
+    hex2mem(payload, (void *)&regdata, 8 * 2);
     if (i == 57)
       ptrace(PTRACE_POKEUSER, pid, 8 * ORIG_RAX, regdata);
     else
