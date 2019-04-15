@@ -3,207 +3,26 @@
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
-#include <sys/poll.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/reg.h>
+#include <stdbool.h>
 #include <sys/wait.h>
 #include <sys/user.h>
 #include <sys/ptrace.h>
+
+#include "arch.h"
+#include "utils.h"
+#include "packets.h"
 #include "gdb_signals.h"
 
-static const char INTERRUPT_CHAR = '\x03';
-
-uint8_t reg_map[] = {10, 5, 11, 12, 13, 14, 4, 19, 9, 8, 7, 6, 3, 2, 1, 0, 16, 18, 17, 20, 23, 24, 25, 26};
-uint8_t reg_size[] = {8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4};
-uint8_t break_instr[] = {0xcc};
-uint8_t inbuf[32768];
-uint8_t outbuf[32768];
-int inbufpos;
-int outbufpos;
 int pid;
 int stat_loc;
+
+#define BREAKPOINT_NUMBER 64
 
 struct debug_breakpoint_t
 {
   size_t addr;
   size_t orig_data;
-} breakpoints[10];
-
-static const char hexchars[] = "0123456789abcdef";
-
-int hex(char ch)
-{
-  if ((ch >= 'a') && (ch <= 'f'))
-    return (ch - 'a' + 10);
-  if ((ch >= '0') && (ch <= '9'))
-    return (ch - '0');
-  if ((ch >= 'A') && (ch <= 'F'))
-    return (ch - 'A' + 10);
-  return (-1);
-}
-
-char *mem2hex(char *mem, char *buf, int count)
-{
-  unsigned char ch;
-  for (int i = 0; i < count; i++)
-  {
-    ch = *(mem++);
-    *buf++ = hexchars[ch >> 4];
-    *buf++ = hexchars[ch % 16];
-  }
-  *buf = 0;
-  return (buf);
-}
-
-char *hex2mem(char *buf, char *mem, int count)
-{
-  unsigned char ch;
-  for (int i = 0; i < count; i++)
-  {
-    ch = hex(*buf++) << 4;
-    ch = ch + hex(*buf++);
-    *(mem++) = ch;
-  }
-  return (mem);
-}
-
-int poll_socket(int sock_fd, short events)
-{
-  struct pollfd pfd;
-
-  memset(&pfd, 0, sizeof(pfd));
-  pfd.fd = sock_fd;
-  pfd.events = events;
-
-  int ret = poll(&pfd, 1, -1);
-  if (ret < 0)
-  {
-    perror("poll() failed");
-    exit(-1);
-  }
-}
-
-int poll_incoming(int sock_fd)
-{
-  return poll_socket(sock_fd, POLLIN);
-}
-
-int poll_outgoing(int sock_fd)
-{
-  return poll_socket(sock_fd, POLLOUT);
-}
-
-void write_data_raw(const uint8_t *data, ssize_t len)
-{
-  assert(outbufpos + len < sizeof(outbuf));
-  memcpy(outbuf + outbufpos, data, len);
-  outbufpos += len;
-}
-
-void write_hex(unsigned long hex)
-{
-  char buf[32];
-  size_t len;
-
-  len = snprintf(buf, sizeof(buf) - 1, "%02lx", hex);
-  write_data_raw((uint8_t *)buf, len);
-}
-
-void write_packet_bytes(const uint8_t *data, size_t num_bytes)
-{
-  uint8_t checksum;
-  size_t i;
-
-  write_data_raw((uint8_t *)"$", 1);
-  for (i = 0, checksum = 0; i < num_bytes; ++i)
-  {
-    checksum += data[i];
-  }
-  write_data_raw((uint8_t *)data, num_bytes);
-  write_data_raw((uint8_t *)"#", 1);
-  write_hex(checksum);
-}
-
-void write_packet(const char *data)
-{
-  write_packet_bytes((const uint8_t *)data, strlen(data));
-}
-
-void write_flush(int sock_fd)
-{
-  size_t write_index = 0;
-  while (write_index < outbufpos)
-  {
-    ssize_t nwritten;
-    poll_outgoing(sock_fd);
-    nwritten = write(sock_fd, outbuf + write_index, outbufpos - write_index);
-    if (nwritten < 0)
-    {
-      printf("Write error\n");
-      exit(-2);
-    }
-    write_index += nwritten;
-  }
-  outbufpos = 0;
-}
-
-void read_data_once(int sock_fd)
-{
-  int ret;
-  ssize_t nread;
-  uint8_t buf[4096];
-
-  poll_incoming(sock_fd);
-  nread = read(sock_fd, buf, sizeof(buf));
-  if (nread <= 0)
-  {
-    puts("Connection closed");
-    exit(0);
-  }
-  if (inbufpos + nread >= sizeof(inbuf))
-  {
-    puts("Read buffer overflow");
-    exit(-2);
-  }
-  memcpy(inbuf + inbufpos, buf, nread);
-  inbufpos += nread;
-}
-
-int skip_to_packet_start()
-{
-  ssize_t end = -1;
-  for (size_t i = 0; i < inbufpos; ++i)
-  {
-    if (inbuf[i] == '$' || inbuf[i] == INTERRUPT_CHAR)
-    {
-      end = i;
-      break;
-    }
-  }
-
-  if (end < 0)
-  {
-    inbufpos = 0;
-    return 0;
-  }
-  memmove(inbuf, inbuf + end, inbufpos - end);
-  inbufpos -= end;
-
-  assert(1 <= inbufpos);
-  assert('$' == inbuf[0] || INTERRUPT_CHAR == inbuf[0]);
-  return 1;
-}
-
-void read_packet(int sock_fd)
-{
-  while (!skip_to_packet_start())
-    read_data_once(sock_fd);
-  write_data_raw((uint8_t *)"+", 1);
-  write_flush(sock_fd);
-}
+} breakpoints[BREAKPOINT_NUMBER];
 
 void process_xfer(const char *name, char *args)
 {
@@ -284,7 +103,7 @@ void prepare_resume_reply(uint8_t *buf)
 int set_breakpoint(int pid, size_t addr, size_t length)
 {
   int i;
-  for (i = 0; i < 10; i++)
+  for (i = 0; i < BREAKPOINT_NUMBER; i++)
     if (breakpoints[i].addr == 0)
     {
       size_t data = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, NULL);
@@ -295,7 +114,7 @@ int set_breakpoint(int pid, size_t addr, size_t length)
       ptrace(PTRACE_POKEDATA, pid, (void *)addr, data);
       break;
     }
-  if (i == 10)
+  if (i == BREAKPOINT_NUMBER)
     return -1;
   else
     return 0;
@@ -304,14 +123,14 @@ int set_breakpoint(int pid, size_t addr, size_t length)
 int remove_breakpoint(int pid, size_t addr, size_t length)
 {
   int i;
-  for (i = 0; i < 10; i++)
+  for (i = 0; i < BREAKPOINT_NUMBER; i++)
     if (breakpoints[i].addr == addr)
     {
       ptrace(PTRACE_POKEDATA, pid, (void *)addr, breakpoints[i].orig_data);
       breakpoints[i].addr = 0;
       break;
     }
-  if (i == 10)
+  if (i == BREAKPOINT_NUMBER)
     return -1;
   else
     return 0;
@@ -319,7 +138,9 @@ int remove_breakpoint(int pid, size_t addr, size_t length)
 
 void process_packet()
 {
-  uint8_t *packetend_ptr = (uint8_t *)memchr(inbuf, '#', inbufpos);
+  uint8_t *inbuf = inbuf_get();
+  int inbuf_size = inbuf_end();
+  uint8_t *packetend_ptr = (uint8_t *)memchr(inbuf, '#', inbuf_size);
   int packetend = packetend_ptr - inbuf;
   assert('$' == inbuf[0]);
   char request = inbuf[1];
@@ -330,9 +151,7 @@ void process_packet()
   uint8_t checksum_str[3];
   for (int i = 1; i < packetend; i++)
     checksum += inbuf[i];
-  snprintf(checksum_str, 3, "%02lx", checksum);
-  assert(!strncmp(checksum_str, inbuf + packetend + 1, 2));
-  struct user_regs_struct regs;
+  assert(checksum == (hex(inbuf[packetend + 1]) << 4 | hex(inbuf[packetend + 2])));
 
   uint8_t tmpbuf[400];
 
@@ -346,13 +165,14 @@ void process_packet()
     break;
   case 'g':
   {
+    struct user_regs_struct regs;
     uint8_t regbuf[20];
     tmpbuf[0] = '\0';
     ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-    for (int i = 0; i < sizeof(reg_map); i++)
+    for (int i = 0; i < ARCH_REG_NUM; i++)
     {
-      mem2hex((void *)(((size_t *)&regs) + reg_map[i]), regbuf, reg_size[i]);
-      regbuf[reg_size[i] * 2] = '\0';
+      mem2hex((void *)(((size_t *)&regs) + regs_map[i].idx), regbuf, regs_map[i].size);
+      regbuf[regs_map[i].size * 2] = '\0';
       strcat(tmpbuf, regbuf);
     }
     write_packet(tmpbuf);
@@ -399,14 +219,14 @@ void process_packet()
   case 'p':
   {
     int i = strtol(payload, NULL, 16);
-    if (i > sizeof(reg_map))
+    if (i > ARCH_REG_NUM)
     {
       write_packet("E01");
       break;
     }
-    size_t regdata = ptrace(PTRACE_PEEKUSER, pid, 8 * reg_map[i], NULL);
-    mem2hex((void *)&regdata, tmpbuf, reg_size[i]);
-    tmpbuf[reg_size[i] * 2] = '\0';
+    size_t regdata = ptrace(PTRACE_PEEKUSER, pid, 8 * regs_map[i].idx, NULL);
+    mem2hex((void *)&regdata, tmpbuf, regs_map[i].size);
+    tmpbuf[regs_map[i].size * 2] = '\0';
     write_packet(tmpbuf);
     break;
   }
@@ -414,7 +234,7 @@ void process_packet()
   {
     int i = strtol(payload, &payload, 16);
     assert('=' == *payload++);
-    if (i > sizeof(reg_map) && i != 57)
+    if (i > ARCH_REG_NUM && i != 57)
     {
       write_packet("E01");
       break;
@@ -424,7 +244,7 @@ void process_packet()
     if (i == 57)
       ptrace(PTRACE_POKEUSER, pid, 8 * ORIG_RAX, regdata);
     else
-      ptrace(PTRACE_POKEUSER, pid, 8 * reg_map[i], regdata);
+      ptrace(PTRACE_POKEUSER, pid, 8 * regs_map[i].idx, regdata);
     write_packet("OK");
     break;
   }
@@ -485,60 +305,17 @@ void process_packet()
     break;
   }
 
-  memmove(inbuf, inbuf + packetend + 3, inbufpos - packetend);
-  inbufpos -= packetend + 3;
+  inbuf_erase_head(packetend + 3);
 }
 
-void get_request(int sock_fd)
+void get_request()
 {
-  while (1)
+  while (true)
   {
-    read_packet(sock_fd);
+    read_packet();
     process_packet();
-    write_flush(sock_fd);
+    write_flush();
   }
-}
-
-void start_server()
-{
-  int ret;
-  const int one = 1;
-  int listen_fd, sock_fd;
-
-  listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (listen_fd < 0)
-  {
-    perror("socket() failed");
-    exit(-1);
-  }
-  ret = setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-  if (ret < 0)
-  {
-    perror("setsockopt() failed");
-    exit(-1);
-  }
-  struct sockaddr_in addr;
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-  addr.sin_port = htons(1234);
-  ret = bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr));
-  if (ret < 0)
-  {
-    perror("bind() failed");
-    exit(-1);
-  }
-  ret = listen(listen_fd, 1);
-  if (ret < 0)
-  {
-    perror("listen() failed");
-    exit(-1);
-  }
-
-  sock_fd = accept(listen_fd, NULL, NULL);
-  ret = setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-  memset(inbuf, 0, sizeof(inbuf));
-  inbufpos = 0;
-  get_request(sock_fd);
 }
 
 int main(int argc, char *argv[])
@@ -553,7 +330,8 @@ int main(int argc, char *argv[])
   else if (pid >= 1)
   {
     wait(&stat_loc);
-    start_server();
+    get_connection();
+    get_request();
   }
   return 0;
 }
