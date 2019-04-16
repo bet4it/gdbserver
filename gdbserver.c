@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <unistd.h>
 #include <assert.h>
 #include <stdbool.h>
@@ -23,6 +24,11 @@ struct debug_breakpoint_t
   size_t addr;
   size_t orig_data;
 } breakpoints[BREAKPOINT_NUMBER];
+
+void sigint_pid()
+{
+  kill(pid, SIGINT);
+}
 
 void process_xfer(const char *name, char *args)
 {
@@ -158,8 +164,10 @@ void process_packet()
   switch (request)
   {
   case 'c':
+    enable_async_io();
     ptrace(PTRACE_CONT, pid, NULL, NULL);
     wait(&stat_loc);
+    disable_async_io();
     prepare_resume_reply(tmpbuf);
     write_packet(tmpbuf);
     break;
@@ -329,6 +337,7 @@ int main(int argc, char *argv[])
   }
   else if (pid >= 1)
   {
+    initialize_async_io(sigint_pid);
     wait(&stat_loc);
     get_connection();
     get_request();

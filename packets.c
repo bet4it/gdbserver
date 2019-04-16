@@ -1,7 +1,9 @@
 // Many codes in this file was borrowed from GdbConnection.cc in rr
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <assert.h>
 #include <unistd.h>
 #include <stdbool.h>
@@ -179,6 +181,66 @@ void read_packet()
     write_flush();
 }
 
+static int async_io_enabled;
+void (*request_interrupt)(void);
+
+static void enable_async_notification(int fd)
+{
+#if defined(F_SETFL) && defined(FASYNC)
+    int save_fcntl_flags;
+
+    save_fcntl_flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, save_fcntl_flags | FASYNC);
+#if defined(F_SETOWN)
+    fcntl(fd, F_SETOWN, getpid());
+#endif
+#endif
+}
+
+static void input_interrupt(int unused)
+{
+    if (async_io_enabled)
+    {
+        int nread;
+        char buf;
+        nread = read(sock_fd, &buf, 1);
+        assert(nread == 1 && buf == INTERRUPT_CHAR);
+        request_interrupt();
+    }
+}
+
+static void block_unblock_async_io(int block)
+{
+    sigset_t sigio_set;
+    sigemptyset(&sigio_set);
+    sigaddset(&sigio_set, SIGIO);
+    sigprocmask(block ? SIG_BLOCK : SIG_UNBLOCK, &sigio_set, NULL);
+}
+
+void enable_async_io(void)
+{
+    if (async_io_enabled)
+        return;
+    block_unblock_async_io(0);
+    async_io_enabled = 1;
+}
+
+void disable_async_io(void)
+{
+    if (!async_io_enabled)
+        return;
+    block_unblock_async_io(1);
+    async_io_enabled = 0;
+}
+
+void initialize_async_io(void (*intr_func)(void))
+{
+    request_interrupt = intr_func;
+    async_io_enabled = 1;
+    disable_async_io();
+    signal(SIGIO, input_interrupt);
+}
+
 void get_connection()
 {
     int ret;
@@ -225,6 +287,7 @@ void get_connection()
 
     ret = setsockopt(sock_fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
     ret = setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    enable_async_notification(sock_fd);
     close(listen_fd);
     pktbuf_clear(&in);
     pktbuf_clear(&out);
