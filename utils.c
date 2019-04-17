@@ -35,3 +35,19 @@ char *hex2mem(char *buf, char *mem, int count)
     }
     return (mem);
 }
+
+int unescape(char *msg, int len)
+{
+    char *w = msg, *r = msg;
+    while (r - msg < len)
+    {
+        char v = *r++;
+        if (v != '}')
+        {
+            *w++ = v;
+            continue;
+        }
+        *w++ = *r++ ^ 0x20;
+    }
+    return w - msg;
+}

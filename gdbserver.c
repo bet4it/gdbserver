@@ -56,8 +56,27 @@ void process_query(char *payload)
     write_packet("QC1234");
   if (!strcmp(name, "Attached"))
     write_packet("1");
+  if (!strcmp(name, "Offsets"))
+    write_packet("");
   if (!strcmp(name, "Supported"))
     write_packet("PacketSize=32768;qXfer:features:read+");
+  if (!strcmp(name, "Symbol"))
+  {
+    const char *colon = strchr(args, ':');
+    int has_address;
+    size_t address;
+    assert(colon != NULL);
+    if (*args == ':')
+      has_address = 0;
+    else
+    {
+      has_address = 1;
+      address = strtoul(args, &args, 16);
+    }
+    assert(*args == ':');
+    ++args;
+    write_packet("OK");
+  }
   if (!strcmp(name, "TStatus"))
     write_packet("");
   if (!strcmp(name, "Xfer"))
@@ -86,13 +105,9 @@ void process_vpacket(char *payload)
   }
   name = payload;
   if (!strcmp("Cont?", name))
-  {
     write_packet("");
-  }
   if (!strcmp("MustReplyEmpty", name))
-  {
     write_packet("");
-  }
 }
 
 void prepare_resume_reply(uint8_t *buf)
@@ -271,14 +286,24 @@ void process_packet()
   case 'X':
   {
     size_t maddr, mlen, mdata;
+    int new_len;
     maddr = strtoul(payload, &payload, 16);
     assert(',' == *payload++);
     mlen = strtoul(payload, &payload, 16);
     assert(':' == *payload++);
-    assert(mlen <= 8);
-    mdata = ptrace(PTRACE_PEEKDATA, pid, maddr, NULL);
-    memcpy((void *)&mdata, payload, mlen);
-    ptrace(PTRACE_POKEDATA, pid, maddr, mdata);
+    new_len = unescape(payload, (char *)packetend_ptr - payload);
+    assert(new_len == mlen);
+    for (int i = 0; i < mlen; i += 8)
+    {
+      if (mlen - i >= 8)
+        memcpy((void *)&mdata, payload + i, 8);
+      else
+      {
+        mdata = ptrace(PTRACE_PEEKDATA, pid, maddr + i, NULL);
+        memcpy((void *)&mdata, payload + i, mlen - i);
+      }
+      ptrace(PTRACE_POKEDATA, pid, maddr + i, mdata);
+    }
     write_packet("OK");
     break;
   }
