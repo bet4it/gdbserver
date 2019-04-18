@@ -14,8 +14,22 @@
 #include "packets.h"
 #include "gdb_signals.h"
 
-int pid;
 int stat_loc;
+
+#define THREAD_NUMBER 64
+
+struct thread_id_t
+{
+  pid_t pid;
+  pid_t tid;
+};
+
+struct thread_list_t
+{
+  struct thread_id_t t[THREAD_NUMBER];
+  struct thread_id_t curr;
+  int len;
+} threads;
 
 #define BREAKPOINT_NUMBER 64
 
@@ -27,7 +41,46 @@ struct debug_breakpoint_t
 
 void sigint_pid()
 {
-  kill(pid, SIGINT);
+  kill(threads.curr.pid, SIGINT);
+}
+
+bool is_clone_event(int status)
+{
+  return (status >> 8 == (SIGTRAP | (PTRACE_EVENT_CLONE << 8)));
+}
+
+bool check_clone()
+{
+  if (is_clone_event(stat_loc))
+  {
+    size_t newtid;
+    ptrace(PTRACE_GETEVENTMSG, threads.curr.tid, NULL, (long)&newtid);
+    if (waitpid(newtid, &stat_loc, __WALL) > 0)
+    {
+      for (int i = 0; i < THREAD_NUMBER; i++)
+        if (!threads.t[i].tid)
+        {
+          threads.t[i].pid = threads.curr.pid;
+          threads.t[i].tid = newtid;
+          threads.len++;
+          break;
+        }
+      ptrace(PTRACE_CONT, newtid, NULL, NULL);
+    }
+    return true;
+  }
+  return false;
+}
+
+void prepare_resume_reply(uint8_t *buf)
+{
+
+  if (WIFEXITED(stat_loc))
+    sprintf(buf, "W%02x", gdb_signal_from_host(WEXITSTATUS(stat_loc)));
+  if (WIFSTOPPED(stat_loc))
+    sprintf(buf, "S%02x", gdb_signal_from_host(WSTOPSIG(stat_loc)));
+  // if (WIFSIGNALED(stat_loc))
+  //   sprintf(buf, "T%02x", gdb_signal_from_host(WTERMSIG(stat_loc)));
 }
 
 void process_xfer(const char *name, char *args)
@@ -45,6 +98,7 @@ void process_query(char *payload)
 {
   const char *name;
   char *args;
+  uint8_t buf[1024];
 
   args = strchr(payload, ':');
   if (args)
@@ -53,7 +107,10 @@ void process_query(char *payload)
   }
   name = payload;
   if (!strcmp(name, "C"))
-    write_packet("QC1234");
+  {
+    snprintf(buf, sizeof(buf), "QC%02x", threads.curr.tid);
+    write_packet(buf);
+  }
   if (!strcmp(name, "Attached"))
     write_packet("1");
   if (!strcmp(name, "Offsets"))
@@ -88,7 +145,21 @@ void process_query(char *payload)
     return process_xfer(name, args);
   }
   if (!strcmp(name, "fThreadInfo"))
-    write_packet("m1234");
+  {
+    struct thread_id_t *ptr = threads.t;
+    uint8_t tmpbuf[32];
+    assert(threads.len > 0);
+    strcpy(buf, "m");
+    for (int i = 0; i < threads.len; i++, ptr++)
+    {
+      while (!ptr->tid)
+        ptr++;
+      snprintf(tmpbuf, sizeof(tmpbuf), "%02x,", ptr->tid);
+      strcat(buf, tmpbuf);
+    }
+    buf[strlen(buf) - 1] = '\0';
+    write_packet(buf);
+  }
   if (!strcmp(name, "sThreadInfo"))
     write_packet("l");
 }
@@ -97,6 +168,7 @@ void process_vpacket(char *payload)
 {
   const char *name;
   char *args;
+  uint8_t tmpbuf[400];
 
   args = strchr(payload, ';');
   if (args)
@@ -104,35 +176,46 @@ void process_vpacket(char *payload)
     *args++ = '\0';
   }
   name = payload;
+  if (!strcmp("Cont", name))
+  {
+    if (args[0] == 'c')
+    {
+      do
+      {
+        enable_async_io();
+        ptrace(PTRACE_CONT, threads.curr.tid, NULL, NULL);
+        threads.curr.tid = waitpid(-1, &stat_loc, __WALL);
+        disable_async_io();
+      } while (check_clone());
+      prepare_resume_reply(tmpbuf);
+      write_packet(tmpbuf);
+    }
+    if (args[0] == 's')
+    {
+      ptrace(PTRACE_SINGLESTEP, threads.curr.tid, NULL, NULL);
+      waitpid(threads.curr.tid, &stat_loc, __WALL);
+      prepare_resume_reply(tmpbuf);
+      write_packet(tmpbuf);
+    }
+  }
   if (!strcmp("Cont?", name))
-    write_packet("");
+    write_packet("vCont;c;C;s;S;");
   if (!strcmp("MustReplyEmpty", name))
     write_packet("");
 }
 
-void prepare_resume_reply(uint8_t *buf)
-{
-
-  if (WIFEXITED(stat_loc))
-    sprintf(buf, "W%02x", gdb_signal_from_host(WEXITSTATUS(stat_loc)));
-  if (WIFSTOPPED(stat_loc))
-    sprintf(buf, "S%02x", gdb_signal_from_host(WSTOPSIG(stat_loc)));
-  // if (WIFSIGNALED(stat_loc))
-  //   sprintf(buf, "T%02x", gdb_signal_from_host(WTERMSIG(stat_loc)));
-}
-
-int set_breakpoint(int pid, size_t addr, size_t length)
+int set_breakpoint(pid_t tid, size_t addr, size_t length)
 {
   int i;
   for (i = 0; i < BREAKPOINT_NUMBER; i++)
     if (breakpoints[i].addr == 0)
     {
-      size_t data = ptrace(PTRACE_PEEKDATA, pid, (void *)addr, NULL);
+      size_t data = ptrace(PTRACE_PEEKDATA, tid, (void *)addr, NULL);
       breakpoints[i].orig_data = data;
       breakpoints[i].addr = addr;
       assert(sizeof(break_instr) <= length);
       memcpy((void *)&data, break_instr, sizeof(break_instr));
-      ptrace(PTRACE_POKEDATA, pid, (void *)addr, data);
+      ptrace(PTRACE_POKEDATA, tid, (void *)addr, data);
       break;
     }
   if (i == BREAKPOINT_NUMBER)
@@ -141,13 +224,13 @@ int set_breakpoint(int pid, size_t addr, size_t length)
     return 0;
 }
 
-int remove_breakpoint(int pid, size_t addr, size_t length)
+int remove_breakpoint(pid_t tid, size_t addr, size_t length)
 {
   int i;
   for (i = 0; i < BREAKPOINT_NUMBER; i++)
     if (breakpoints[i].addr == addr)
     {
-      ptrace(PTRACE_POKEDATA, pid, (void *)addr, breakpoints[i].orig_data);
+      ptrace(PTRACE_POKEDATA, tid, (void *)addr, breakpoints[i].orig_data);
       breakpoints[i].addr = 0;
       break;
     }
@@ -178,20 +261,12 @@ void process_packet()
 
   switch (request)
   {
-  case 'c':
-    enable_async_io();
-    ptrace(PTRACE_CONT, pid, NULL, NULL);
-    wait(&stat_loc);
-    disable_async_io();
-    prepare_resume_reply(tmpbuf);
-    write_packet(tmpbuf);
-    break;
   case 'g':
   {
     struct user_regs_struct regs;
     uint8_t regbuf[20];
     tmpbuf[0] = '\0';
-    ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+    ptrace(PTRACE_GETREGS, threads.curr.tid, NULL, &regs);
     for (int i = 0; i < ARCH_REG_NUM; i++)
     {
       mem2hex((void *)(((size_t *)&regs) + regs_map[i].idx), regbuf, regs_map[i].size);
@@ -216,7 +291,7 @@ void process_packet()
     {
       for (int i = 0; i < mlen; i += 8)
       {
-        mdata = ptrace(PTRACE_PEEKDATA, pid, maddr + i, NULL);
+        mdata = ptrace(PTRACE_PEEKDATA, threads.curr.tid, maddr + i, NULL);
         mem2hex((void *)&mdata, tmpbuf + i * 2, (mlen - i >= 8 ? 8 : mlen - i));
       }
       tmpbuf[mlen * 2] = '\0';
@@ -230,10 +305,10 @@ void process_packet()
           hex2mem(payload + i * 2, (void *)&mdata, 8);
         else
         {
-          mdata = ptrace(PTRACE_PEEKDATA, pid, maddr + i, NULL);
+          mdata = ptrace(PTRACE_PEEKDATA, threads.curr.tid, maddr + i, NULL);
           hex2mem(payload + i * 2, (void *)&mdata, mlen - i);
         }
-        ptrace(PTRACE_POKEDATA, pid, maddr + i, mdata);
+        ptrace(PTRACE_POKEDATA, threads.curr.tid, maddr + i, mdata);
       }
       write_packet("OK");
     }
@@ -247,7 +322,7 @@ void process_packet()
       write_packet("E01");
       break;
     }
-    size_t regdata = ptrace(PTRACE_PEEKUSER, pid, 8 * regs_map[i].idx, NULL);
+    size_t regdata = ptrace(PTRACE_PEEKUSER, threads.curr.tid, 8 * regs_map[i].idx, NULL);
     mem2hex((void *)&regdata, tmpbuf, regs_map[i].size);
     tmpbuf[regs_map[i].size * 2] = '\0';
     write_packet(tmpbuf);
@@ -265,20 +340,14 @@ void process_packet()
     size_t regdata;
     hex2mem(payload, (void *)&regdata, 8 * 2);
     if (i == 57)
-      ptrace(PTRACE_POKEUSER, pid, 8 * ORIG_RAX, regdata);
+      ptrace(PTRACE_POKEUSER, threads.curr.tid, 8 * ORIG_RAX, regdata);
     else
-      ptrace(PTRACE_POKEUSER, pid, 8 * regs_map[i].idx, regdata);
+      ptrace(PTRACE_POKEUSER, threads.curr.tid, 8 * regs_map[i].idx, regdata);
     write_packet("OK");
     break;
   }
   case 'q':
     process_query(payload);
-    break;
-  case 's':
-    ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
-    wait(&stat_loc);
-    prepare_resume_reply(tmpbuf);
-    write_packet(tmpbuf);
     break;
   case 'v':
     process_vpacket(payload);
@@ -299,10 +368,10 @@ void process_packet()
         memcpy((void *)&mdata, payload + i, 8);
       else
       {
-        mdata = ptrace(PTRACE_PEEKDATA, pid, maddr + i, NULL);
+        mdata = ptrace(PTRACE_PEEKDATA, threads.curr.tid, maddr + i, NULL);
         memcpy((void *)&mdata, payload + i, mlen - i);
       }
-      ptrace(PTRACE_POKEDATA, pid, maddr + i, mdata);
+      ptrace(PTRACE_POKEDATA, threads.curr.tid, maddr + i, mdata);
     }
     write_packet("OK");
     break;
@@ -320,9 +389,9 @@ void process_packet()
     {
       int ret;
       if (request == 'Z')
-        ret = set_breakpoint(pid, addr, length);
+        ret = set_breakpoint(threads.curr.tid, addr, length);
       else
-        ret = remove_breakpoint(pid, addr, length);
+        ret = remove_breakpoint(threads.curr.tid, addr, length);
       if (ret == 0)
         write_packet("OK");
       else
@@ -353,7 +422,7 @@ void get_request()
 
 int main(int argc, char *argv[])
 {
-  pid = fork();
+  pid_t pid = fork();
   char *prog = argv[1];
   if (pid == 0)
   {
@@ -363,7 +432,11 @@ int main(int argc, char *argv[])
   else if (pid >= 1)
   {
     initialize_async_io(sigint_pid);
+    threads.t[0].pid = threads.t[0].tid = pid;
+    threads.curr.pid = threads.curr.tid = pid;
+    threads.len = 1;
     wait(&stat_loc);
+    ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACECLONE);
     get_connection();
     get_request();
   }
