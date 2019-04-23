@@ -151,6 +151,38 @@ void write_packet(const char *data)
     write_packet_bytes((const uint8_t *)data, strlen(data));
 }
 
+void write_binary_packet(const char *pfx, const uint8_t *data, ssize_t num_bytes)
+{
+    uint8_t *buf;
+    ssize_t pfx_num_chars = strlen(pfx);
+    ssize_t buf_num_bytes = 0;
+    int i;
+
+    buf = malloc(2 * num_bytes + pfx_num_chars);
+    memcpy(buf, pfx, pfx_num_chars);
+    buf_num_bytes += pfx_num_chars;
+
+    for (i = 0; i < num_bytes; ++i)
+    {
+        uint8_t b = data[i];
+        switch (b)
+        {
+        case '#':
+        case '$':
+        case '}':
+        case '*':
+            buf[buf_num_bytes++] = '}';
+            buf[buf_num_bytes++] = b ^ 0x20;
+            break;
+        default:
+            buf[buf_num_bytes++] = b;
+            break;
+        }
+    }
+    write_packet_bytes(buf, buf_num_bytes);
+    free(buf);
+}
+
 bool skip_to_packet_start()
 {
     ssize_t end = -1;

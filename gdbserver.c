@@ -15,6 +15,7 @@
 #include "gdb_signals.h"
 
 int stat_loc;
+size_t *entry_stack_ptr;
 
 #define THREAD_NUMBER 64
 
@@ -83,6 +84,31 @@ void prepare_resume_reply(uint8_t *buf)
   //   sprintf(buf, "T%02x", gdb_signal_from_host(WTERMSIG(stat_loc)));
 }
 
+void read_auxv(void)
+{
+  size_t *stack_ptr = entry_stack_ptr;
+  size_t argc = ptrace(PTRACE_PEEKDATA, threads.curr.pid, stack_ptr, NULL);
+  stack_ptr += argc + 1;
+  size_t null_ptr = ptrace(PTRACE_PEEKDATA, threads.curr.pid, stack_ptr, NULL);
+  assert(!null_ptr);
+  stack_ptr++;
+
+  while (ptrace(PTRACE_PEEKDATA, threads.curr.pid, (void *)stack_ptr, NULL))
+    stack_ptr++;
+  stack_ptr++;
+
+  size_t auxv_data[1024];
+  size_t *ptr = auxv_data;
+  while (1)
+  {
+    *(ptr++) = ptrace(PTRACE_PEEKDATA, threads.curr.pid, (stack_ptr++), NULL);
+    *(ptr++) = ptrace(PTRACE_PEEKDATA, threads.curr.pid, (stack_ptr++), NULL);
+    if (!(*(ptr - 1) || *(ptr - 2)))
+      break;
+  }
+  write_binary_packet("l", (uint8_t *)auxv_data, (ptr - auxv_data) * sizeof(size_t));
+}
+
 void process_xfer(const char *name, char *args)
 {
   const char *mode = args;
@@ -91,6 +117,10 @@ void process_xfer(const char *name, char *args)
   if (!strcmp(name, "features") && !strcmp(mode, "read"))
   {
     write_packet("l<target version=\"1.0\"><architecture>i386:x86-64</architecture></target>");
+  }
+  if (!strcmp(name, "auxv") && !strcmp(mode, "read"))
+  {
+    read_auxv();
   }
 }
 
@@ -116,7 +146,7 @@ void process_query(char *payload)
   if (!strcmp(name, "Offsets"))
     write_packet("");
   if (!strcmp(name, "Supported"))
-    write_packet("PacketSize=32768;qXfer:features:read+");
+    write_packet("PacketSize=32768;qXfer:features:read+;qXfer:auxv:read+");
   if (!strcmp(name, "Symbol"))
   {
     const char *colon = strchr(args, ':');
@@ -437,6 +467,7 @@ int main(int argc, char *argv[])
     threads.len = 1;
     wait(&stat_loc);
     ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACECLONE);
+    entry_stack_ptr = (size_t *)ptrace(PTRACE_PEEKUSER, pid, 8 * RSP, NULL);
     get_connection();
     get_request();
   }
