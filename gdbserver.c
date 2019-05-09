@@ -3,6 +3,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <assert.h>
 #include <stdbool.h>
 #include <sys/wait.h>
@@ -40,6 +41,8 @@ struct debug_breakpoint_t
   size_t addr;
   size_t orig_data;
 } breakpoints[BREAKPOINT_NUMBER];
+
+uint8_t tmpbuf[0x4000];
 
 void sigint_pid()
 {
@@ -160,12 +163,15 @@ void process_xfer(const char *name, char *args)
   args = strchr(args, ':');
   *args++ = '\0';
   if (!strcmp(name, "features") && !strcmp(mode, "read"))
-  {
     write_packet("l<target version=\"1.0\"><architecture>i386:x86-64</architecture></target>");
-  }
   if (!strcmp(name, "auxv") && !strcmp(mode, "read"))
-  {
     read_auxv();
+  if (!strcmp(name, "exec-file") && !strcmp(mode, "read"))
+  {
+    uint8_t proc_exe_path[20], file_path[256] = {'l'};
+    sprintf(proc_exe_path, "/proc/%d/exe", threads.t[0].pid);
+    realpath(proc_exe_path, file_path + 1);
+    write_packet(file_path);
   }
 }
 
@@ -189,7 +195,7 @@ void process_query(char *payload)
   if (!strcmp(name, "Offsets"))
     write_packet("");
   if (!strcmp(name, "Supported"))
-    write_packet("PacketSize=32768;qXfer:features:read+;qXfer:auxv:read+");
+    write_packet("PacketSize=8000;qXfer:features:read+;qXfer:auxv:read+;qXfer:exec-file:read+");
   if (!strcmp(name, "Symbol"))
   {
     const char *colon = strchr(args, ':');
@@ -226,7 +232,6 @@ void process_query(char *payload)
   if (!strcmp(name, "fThreadInfo"))
   {
     struct thread_id_t *ptr = threads.t;
-    uint8_t tmpbuf[32];
     assert(threads.len > 0);
     strcpy(buf, "m");
     for (int i = 0; i < threads.len; i++, ptr++)
@@ -243,11 +248,42 @@ void process_query(char *payload)
     write_packet("l");
 }
 
+static int gdb_open_flags_to_system_flags(int64_t flags)
+{
+  int ret;
+  switch (flags & 3)
+  {
+  case 0:
+    ret = O_RDONLY;
+    break;
+  case 1:
+    ret = O_WRONLY;
+    break;
+  case 2:
+    ret = O_RDWR;
+    break;
+  default:
+    assert(0);
+    return 0;
+  }
+
+  assert(!(flags & ~(int64_t)(3 | 0x8 | 0x200 | 0x400 | 0x800)));
+
+  if (flags & 0x8)
+    ret |= O_APPEND;
+  if (flags & 0x200)
+    ret |= O_CREAT;
+  if (flags & 0x400)
+    ret |= O_TRUNC;
+  if (flags & 0x800)
+    ret |= O_EXCL;
+  return ret;
+}
+
 void process_vpacket(char *payload)
 {
   const char *name;
   char *args;
-  uint8_t tmpbuf[400];
 
   args = strchr(payload, ';');
   if (args)
@@ -293,6 +329,74 @@ void process_vpacket(char *payload)
     write_packet("vCont;c;C;s;S;");
   if (!strcmp("MustReplyEmpty", name))
     write_packet("");
+  if (name == strstr(name, "File:"))
+  {
+    char *operation = payload + 5;
+    if (operation == strstr(operation, "open:"))
+    {
+      char file_name[128];
+      char *file_name_end = strchr(operation + 5, ',');
+      int file_name_len;
+      assert(file_name_end != NULL);
+      *file_name_end = 0;
+      assert((file_name_len = strlen(operation + 5)) < 128);
+      hex2mem(operation + 5, file_name, file_name_len);
+      file_name[file_name_len / 2] = '\0';
+      char *flags_end;
+      int64_t flags = strtol(file_name_end + 1, &flags_end, 16);
+      assert(*flags_end == ',');
+      flags = gdb_open_flags_to_system_flags(flags);
+      char *mode_end;
+      int64_t mode = strtol(flags_end + 1, &mode_end, 16);
+      assert(*mode_end == 0);
+      assert((mode & ~(int64_t)0777) == 0);
+      int fd;
+      fd = open(file_name, flags, mode);
+      char ret_buf[20];
+      sprintf(ret_buf, "F%d", fd);
+      write_packet(ret_buf);
+    }
+    else if (operation == strstr(operation, "close:"))
+    {
+      char *endptr;
+      int64_t fd = strtol(operation + 6, &endptr, 16);
+      assert(*endptr == 0);
+      close(fd);
+      write_packet("F0");
+    }
+    else if (operation == strstr(operation, "pread:"))
+    {
+      char *fd_end;
+      int fd = strtol(operation + 6, &fd_end, 16);
+      assert(*fd_end == ',');
+      char *size_end;
+      int size = strtol(fd_end + 1, &size_end, 16);
+      assert(*size_end == ',');
+      assert(size >= 0);
+      if (size * 2 > PACKET_BUF_SIZE)
+        size = PACKET_BUF_SIZE / 2;
+      char *offset_end;
+      int offset = strtol(size_end + 1, &offset_end, 16);
+      assert(*offset_end == 0);
+      assert(offset >= 0);
+      char *buf = malloc(size);
+      int ret = pread(fd, buf, size, offset);
+      char resbuf[32];
+      sprintf(resbuf, "F%x;", ret);
+      write_binary_packet(resbuf, buf, ret);
+      free(buf);
+    }
+    else if (operation == strstr(operation, "setfs:"))
+    {
+      char *endptr;
+      int64_t pid = strtol(operation + 6, &endptr, 16);
+      assert(*endptr == 0);
+      assert(pid == 0);
+      write_packet("F0");
+    }
+    else
+      write_packet("");
+  }
 }
 
 int set_breakpoint(pid_t tid, size_t addr, size_t length)
@@ -347,8 +451,6 @@ void process_packet()
   for (int i = 1; i < packetend; i++)
     checksum += inbuf[i];
   assert(checksum == (hex(inbuf[packetend + 1]) << 4 | hex(inbuf[packetend + 2])));
-
-  uint8_t tmpbuf[400];
 
   switch (request)
   {
