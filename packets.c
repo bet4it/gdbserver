@@ -273,18 +273,32 @@ void initialize_async_io(void (*intr_func)(void))
     signal(SIGIO, input_interrupt);
 }
 
-void get_connection()
+void remote_prepare(char *name)
 {
     int ret;
+    char *port_str;
+    int port;
+    struct sockaddr_in addr;
+    char *port_end;
     const int one = 1;
     int listen_fd;
 
-    listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    port_str = strchr(name, ':');
+    if (port_str == NULL)
+        return;
+    *port_str = '\0';
+
+    port = strtoul(port_str + 1, &port_end, 10);
+    if (port_str[1] == '\0' || *port_end != '\0')
+        printf("Bad port argument: %s", name);
+
+    listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
     if (listen_fd < 0)
     {
         perror("socket() failed");
         exit(-1);
     }
+
     ret = setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     if (ret < 0)
     {
@@ -292,10 +306,11 @@ void get_connection()
         exit(-1);
     }
 
-    struct sockaddr_in addr;
+    printf("Listening on port %d\n", port);
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    addr.sin_port = htons(1234);
+    addr.sin_addr.s_addr = inet_addr(name);
+    addr.sin_port = htons(port);
+
     ret = bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr));
     if (ret < 0)
     {

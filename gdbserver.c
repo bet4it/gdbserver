@@ -622,10 +622,19 @@ void get_request()
 
 int main(int argc, char *argv[])
 {
-  pid_t pid = fork();
-  char *prog = argv[1];
+  pid_t pid;
+  char **next_arg = &argv[1];
+  char *arg_end, *port;
+
+  port = *next_arg;
+  next_arg++;
+  if (port == NULL)
+    exit(-1);
+
+  pid = fork();
   if (pid == 0)
   {
+    char *prog = *next_arg;
     setpgrp();
     ptrace(PTRACE_TRACEME, 0, NULL, NULL);
     execl(prog, prog, NULL);
@@ -643,7 +652,7 @@ int main(int argc, char *argv[])
     threads.curr->stat = stat;
     ptrace(PTRACE_SETOPTIONS, threads.curr->tid, NULL, PTRACE_O_TRACECLONE);
     entry_stack_ptr = (size_t *)ptrace(PTRACE_PEEKUSER, threads.curr->tid, 8 * RSP, NULL);
-    get_connection();
+    remote_prepare(port);
     get_request();
   }
   return 0;
