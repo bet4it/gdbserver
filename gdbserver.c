@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <assert.h>
 #include <stdbool.h>
 #include <sys/wait.h>
@@ -118,6 +119,29 @@ void stop_threads()
   threads.curr = cthread;
 }
 
+size_t init_tids(const pid_t pid)
+{
+  char dirname[64];
+  DIR *dir;
+  struct dirent *ent;
+  int i = 0;
+
+  snprintf(dirname, sizeof dirname, "/proc/%d/task/", (int)pid);
+  dir = opendir(dirname);
+  if (!dir)
+    perror("opendir()");
+  while ((ent = readdir(dir)) != NULL)
+  {
+    if (ent->d_name[0] == '.')
+      continue;
+    threads.t[i].pid = pid;
+    threads.t[i].tid = atoi(ent->d_name);
+    threads.len++;
+    i++;
+  }
+  closedir(dir);
+}
+
 void prepare_resume_reply(uint8_t *buf, bool cont)
 {
   if (WIFEXITED(threads.curr->stat))
@@ -134,27 +158,14 @@ void prepare_resume_reply(uint8_t *buf, bool cont)
 
 void read_auxv(void)
 {
-  size_t *stack_ptr = entry_stack_ptr;
-  size_t argc = ptrace(PTRACE_PEEKDATA, threads.curr->pid, stack_ptr, NULL);
-  stack_ptr += argc + 1;
-  size_t null_ptr = ptrace(PTRACE_PEEKDATA, threads.curr->pid, stack_ptr, NULL);
-  assert(!null_ptr);
-  stack_ptr++;
-
-  while (ptrace(PTRACE_PEEKDATA, threads.curr->pid, (void *)stack_ptr, NULL))
-    stack_ptr++;
-  stack_ptr++;
-
-  size_t auxv_data[1024];
-  size_t *ptr = auxv_data;
-  while (1)
-  {
-    *(ptr++) = ptrace(PTRACE_PEEKDATA, threads.curr->pid, (stack_ptr++), NULL);
-    *(ptr++) = ptrace(PTRACE_PEEKDATA, threads.curr->pid, (stack_ptr++), NULL);
-    if (!(*(ptr - 1) || *(ptr - 2)))
-      break;
-  }
-  write_binary_packet("l", (uint8_t *)auxv_data, (ptr - auxv_data) * sizeof(size_t));
+  uint8_t proc_auxv_path[20];
+  FILE *fp;
+  int ret;
+  sprintf(proc_auxv_path, "/proc/%d/auxv", threads.t[0].pid);
+  fp = fopen(proc_auxv_path, "r");
+  ret = fread(tmpbuf, 1, sizeof(tmpbuf), fp);
+  fclose(fp);
+  write_binary_packet("l", tmpbuf, ret);
 }
 
 void process_xfer(const char *name, char *args)
@@ -602,8 +613,7 @@ void process_packet()
     break;
   }
   case '?':
-    prepare_resume_reply(tmpbuf, false);
-    write_packet(tmpbuf);
+    write_packet("S05");
     break;
   }
 
@@ -624,36 +634,69 @@ int main(int argc, char *argv[])
 {
   pid_t pid;
   char **next_arg = &argv[1];
-  char *arg_end, *port;
+  char *arg_end, *target = NULL;
+  volatile int attach = 0;
+  int stat;
 
-  port = *next_arg;
+  if (*next_arg != NULL && strcmp(*next_arg, "--attach") == 0)
+  {
+    attach = 1;
+    next_arg++;
+  }
+
+  target = *next_arg;
   next_arg++;
-  if (port == NULL)
-    exit(-1);
 
-  pid = fork();
-  if (pid == 0)
+  if (target == NULL || *next_arg == NULL)
   {
-    char *prog = *next_arg;
-    setpgrp();
-    ptrace(PTRACE_TRACEME, 0, NULL, NULL);
-    execl(prog, prog, NULL);
+    printf("Usage : gdbserver 127.0.0.1:1234 a.out or gdbserver --attach 127.0.0.1:1234 2468\n");
+    exit(-1);
   }
-  else if (pid >= 1)
+
+  if (attach)
   {
-    pid_t tid;
-    int stat;
-    initialize_async_io(sigint_pid);
+    pid = atoi(*next_arg);
+    init_tids(pid);
+    for (int i = 0, n = 0; i < THREAD_NUMBER && n < threads.len; i++)
+      if (threads.t[i].tid)
+      {
+        if (ptrace(PTRACE_ATTACH, threads.t[i].tid, NULL, NULL) < 0)
+        {
+          perror("ptrace()");
+          return -1;
+        }
+        if (waitpid(threads.t[i].tid, &threads.t[i].stat, __WALL) < 0)
+        {
+          perror("waitpid");
+          return -1;
+        }
+        ptrace(PTRACE_SETOPTIONS, threads.t[i].tid, NULL, PTRACE_O_TRACECLONE);
+        n++;
+      }
+  }
+  else
+  {
+    pid = fork();
+    if (pid == 0)
+    {
+      char *prog = *next_arg;
+      setpgrp();
+      ptrace(PTRACE_TRACEME, 0, NULL, NULL);
+      execl(prog, prog, NULL);
+    }
+    if (waitpid(pid, &stat, __WALL) < 0)
+    {
+      perror("waitpid");
+      return -1;
+    }
     threads.t[0].pid = threads.t[0].tid = pid;
-    threads.curr = &threads.t[0];
+    threads.t[0].stat = stat;
     threads.len = 1;
-    tid = waitpid(-1, &stat, __WALL);
-    assert(threads.curr->tid == tid);
-    threads.curr->stat = stat;
-    ptrace(PTRACE_SETOPTIONS, threads.curr->tid, NULL, PTRACE_O_TRACECLONE);
-    entry_stack_ptr = (size_t *)ptrace(PTRACE_PEEKUSER, threads.curr->tid, 8 * RSP, NULL);
-    remote_prepare(port);
-    get_request();
+    ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACECLONE);
   }
+  threads.curr = &threads.t[0];
+  initialize_async_io(sigint_pid);
+  remote_prepare(target);
+  get_request();
   return 0;
 }
