@@ -446,6 +446,20 @@ int remove_breakpoint(pid_t tid, size_t addr, size_t length)
     return 0;
 }
 
+size_t restore_breakpoint(size_t addr, size_t length, size_t data)
+{
+  for (int i = 0; i < BREAKPOINT_NUMBER; i++)
+  {
+    int bp_addr = breakpoints[i].addr;
+    if (bp_addr && bp_addr >= addr && bp_addr < addr + length)
+    {
+      assert(bp_addr + sizeof(break_instr) <= addr + length);
+      memcpy((uint8_t *)&data + (bp_addr - addr), &breakpoints[i].orig_data, sizeof(break_instr));
+    }
+  }
+  return data;
+}
+
 void process_packet()
 {
   uint8_t *inbuf = inbuf_get();
@@ -503,6 +517,7 @@ void process_packet()
       for (int i = 0; i < mlen; i += 8)
       {
         mdata = ptrace(PTRACE_PEEKDATA, threads.curr->tid, maddr + i, NULL);
+        mdata = restore_breakpoint(maddr, sizeof(size_t), mdata);
         mem2hex((void *)&mdata, tmpbuf + i * 2, (mlen - i >= 8 ? 8 : mlen - i));
       }
       tmpbuf[mlen * 2] = '\0';
