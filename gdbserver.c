@@ -68,6 +68,35 @@ bool check_exit()
   return false;
 }
 
+void check_sigtrap()
+{
+  siginfo_t info;
+  ptrace(PTRACE_GETSIGINFO, threads.curr->tid, NULL, &info);
+  if (info.si_code == SI_KERNEL && info.si_signo == SIGTRAP)
+  {
+    size_t rip = ptrace(PTRACE_PEEKUSER, threads.curr->tid, 8 * RIP, NULL);
+    rip -= sizeof(break_instr);
+    for (int i = 0; i < BREAKPOINT_NUMBER; i++)
+      if (breakpoints[i].addr == rip)
+      {
+        ptrace(PTRACE_POKEUSER, threads.curr->tid, 8 * RIP, rip);
+        break;
+      }
+  }
+}
+
+bool check_sigstop()
+{
+  siginfo_t info;
+  ptrace(PTRACE_GETSIGINFO, threads.curr->tid, NULL, &info);
+  if (info.si_code == SI_TKILL && info.si_signo == SIGSTOP)
+  {
+    ptrace(PTRACE_CONT, threads.curr->tid, NULL, NULL);
+    return true;
+  }
+  return false;
+}
+
 bool check_clone()
 {
   if (is_clone_event(threads.curr->stat))
@@ -115,6 +144,7 @@ void stop_threads()
           printf("Failed to stop thread %d\n", threads.curr->tid);
         waitpid(threads.curr->tid, &threads.curr->stat, __WALL);
         check_exit();
+        check_sigtrap();
       } while (check_clone());
   threads.curr = cthread;
 }
@@ -321,7 +351,7 @@ void process_vpacket(char *payload)
         set_curr_thread(tid);
         threads.curr->stat = stat;
         disable_async_io();
-      } while (check_exit() || check_clone());
+      } while (check_exit() || check_sigstop() || check_clone());
       prepare_resume_reply(tmpbuf, true);
       write_packet(tmpbuf);
     }
