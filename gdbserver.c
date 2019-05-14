@@ -44,6 +44,7 @@ struct debug_breakpoint_t
 } breakpoints[BREAKPOINT_NUMBER];
 
 uint8_t tmpbuf[0x4000];
+bool attach = false;
 
 void sigint_pid()
 {
@@ -232,7 +233,12 @@ void process_query(char *payload)
     write_packet(buf);
   }
   if (!strcmp(name, "Attached"))
-    write_packet("1");
+  {
+    if (attach)
+      write_packet("1");
+    else
+      write_packet("0");
+  }
   if (!strcmp(name, "Offsets"))
     write_packet("");
   if (!strcmp(name, "Supported"))
@@ -368,6 +374,11 @@ void process_vpacket(char *payload)
   }
   if (!strcmp("Cont?", name))
     write_packet("vCont;c;C;s;S;");
+  if (!strcmp("Kill", name))
+  {
+    kill(-threads.t[0].pid, SIGKILL);
+    write_packet("OK");
+  }
   if (!strcmp("MustReplyEmpty", name))
     write_packet("");
   if (name == strstr(name, "File:"))
@@ -509,6 +520,12 @@ void process_packet()
 
   switch (request)
   {
+  case 'D':
+    for (int i = 0, n = 0; i < THREAD_NUMBER && n < threads.len; i++)
+      if (threads.t[i].tid)
+        if (ptrace(PTRACE_DETACH, threads.t[i].tid, NULL, NULL) < 0)
+          perror("ptrace()");
+    exit(0);
   case 'g':
   {
     struct user_regs_struct regs;
@@ -680,12 +697,11 @@ int main(int argc, char *argv[])
   pid_t pid;
   char **next_arg = &argv[1];
   char *arg_end, *target = NULL;
-  volatile int attach = 0;
   int stat;
 
   if (*next_arg != NULL && strcmp(*next_arg, "--attach") == 0)
   {
-    attach = 1;
+    attach = true;
     next_arg++;
   }
 
@@ -737,7 +753,7 @@ int main(int argc, char *argv[])
     threads.t[0].pid = threads.t[0].tid = pid;
     threads.t[0].stat = stat;
     threads.len = 1;
-    ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACECLONE);
+    ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACECLONE | PTRACE_O_EXITKILL);
   }
   threads.curr = &threads.t[0];
   initialize_async_io(sigint_pid);
