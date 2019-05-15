@@ -221,7 +221,6 @@ void process_query(char *payload)
 {
   const char *name;
   char *args;
-  uint8_t buf[1024];
 
   args = strchr(payload, ':');
   if (args)
@@ -229,8 +228,8 @@ void process_query(char *payload)
   name = payload;
   if (!strcmp(name, "C"))
   {
-    snprintf(buf, sizeof(buf), "QC%02x", threads.curr->tid);
-    write_packet(buf);
+    snprintf(tmpbuf, sizeof(tmpbuf), "QC%02x", threads.curr->tid);
+    write_packet(tmpbuf);
   }
   if (!strcmp(name, "Attached"))
   {
@@ -244,23 +243,8 @@ void process_query(char *payload)
   if (!strcmp(name, "Supported"))
     write_packet("PacketSize=8000;qXfer:features:read+;qXfer:auxv:read+;qXfer:exec-file:read+");
   if (!strcmp(name, "Symbol"))
-  {
-    const char *colon = strchr(args, ':');
-    int has_address;
-    size_t address;
-    assert(colon != NULL);
-    if (*args == ':')
-      has_address = 0;
-    else
-    {
-      has_address = 1;
-      address = strtoul(args, &args, 16);
-    }
-    assert(*args == ':');
-    ++args;
     write_packet("OK");
-  }
-  if (strstr(name, "ThreadExtraInfo") == name)
+  if (name == strstr(name, "ThreadExtraInfo"))
   {
     args = payload;
     args = 1 + strchr(args, ',');
@@ -273,23 +257,23 @@ void process_query(char *payload)
     name = args;
     args = strchr(args, ':');
     *args++ = '\0';
-
     return process_xfer(name, args);
   }
   if (!strcmp(name, "fThreadInfo"))
   {
     struct thread_id_t *ptr = threads.t;
+    uint8_t pid_buf[10];
     assert(threads.len > 0);
-    strcpy(buf, "m");
+    strcpy(tmpbuf, "m");
     for (int i = 0; i < threads.len; i++, ptr++)
     {
       while (!ptr->tid)
         ptr++;
-      snprintf(tmpbuf, sizeof(tmpbuf), "%02x,", ptr->tid);
-      strcat(buf, tmpbuf);
+      snprintf(pid_buf, sizeof(pid_buf), "%02x,", ptr->tid);
+      strcat(tmpbuf, pid_buf);
     }
-    buf[strlen(buf) - 1] = '\0';
-    write_packet(buf);
+    tmpbuf[strlen(tmpbuf) - 1] = '\0';
+    write_packet(tmpbuf);
   }
   if (!strcmp(name, "sThreadInfo"))
     write_packet("l");
@@ -331,13 +315,11 @@ void process_vpacket(char *payload)
 {
   const char *name;
   char *args;
-
   args = strchr(payload, ';');
   if (args)
-  {
     *args++ = '\0';
-  }
   name = payload;
+
   if (!strcmp("Cont", name))
   {
     if (args[0] == 'c')
@@ -383,75 +365,57 @@ void process_vpacket(char *payload)
     write_packet("");
   if (name == strstr(name, "File:"))
   {
-    char *operation = payload + 5;
+    char *operation = strchr(name, ':') + 1;
     if (operation == strstr(operation, "open:"))
     {
-      char file_name[128];
-      char *file_name_end = strchr(operation + 5, ',');
-      int file_name_len;
+      char *parameter = strchr(operation, ':') + 1;
+      char file_name[128], *file_name_end = strchr(parameter, ',');
+      int file_name_len, fd;
+      size_t flags, mode;
       assert(file_name_end != NULL);
       *file_name_end = 0;
-      assert((file_name_len = strlen(operation + 5)) < 128);
-      hex2mem(operation + 5, file_name, file_name_len);
+      assert((file_name_len = strlen(parameter)) < 128);
+      hex2mem(parameter, file_name, file_name_len);
       file_name[file_name_len / 2] = '\0';
-      char *flags_end;
-      int64_t flags = strtol(file_name_end + 1, &flags_end, 16);
-      assert(*flags_end == ',');
+      parameter += file_name_len + 1;
+      assert(sscanf(parameter, "%zx,%zx", &flags, &mode) == 2);
       flags = gdb_open_flags_to_system_flags(flags);
-      char *mode_end;
-      int64_t mode = strtol(flags_end + 1, &mode_end, 16);
-      assert(*mode_end == 0);
       assert((mode & ~(int64_t)0777) == 0);
-      int fd;
       fd = open(file_name, flags, mode);
-      char ret_buf[20];
-      sprintf(ret_buf, "F%d", fd);
-      write_packet(ret_buf);
+      sprintf(tmpbuf, "F%d", fd);
+      write_packet(tmpbuf);
     }
     else if (operation == strstr(operation, "close:"))
     {
-      char *endptr;
-      int64_t fd = strtol(operation + 6, &endptr, 16);
-      assert(*endptr == 0);
+      char *parameter = strchr(operation, ':') + 1;
+      size_t fd;
+      assert(sscanf(parameter, "%zx", &fd) == 1);
       close(fd);
       write_packet("F0");
     }
     else if (operation == strstr(operation, "pread:"))
     {
-      char *fd_end;
-      int fd = strtol(operation + 6, &fd_end, 16);
-      assert(*fd_end == ',');
-      char *size_end;
-      int size = strtol(fd_end + 1, &size_end, 16);
-      assert(*size_end == ',');
+      char *parameter = strchr(operation, ':') + 1;
+      size_t fd, size, offset;
+      assert(sscanf(parameter, "%zx,%zx,%zx", &fd, &size, &offset) == 3);
       assert(size >= 0);
       if (size * 2 > PACKET_BUF_SIZE)
         size = PACKET_BUF_SIZE / 2;
-      char *offset_end;
-      int offset = strtol(size_end + 1, &offset_end, 16);
-      assert(*offset_end == 0);
       assert(offset >= 0);
       char *buf = malloc(size);
       int ret = pread(fd, buf, size, offset);
-      char resbuf[32];
-      sprintf(resbuf, "F%x;", ret);
-      write_binary_packet(resbuf, buf, ret);
+      sprintf(tmpbuf, "F%x;", ret);
+      write_binary_packet(tmpbuf, buf, ret);
       free(buf);
     }
     else if (operation == strstr(operation, "setfs:"))
-    {
-      char *endptr;
-      int64_t pid = strtol(operation + 6, &endptr, 16);
-      assert(*endptr == 0);
-      assert(pid == 0);
       write_packet("F0");
-    }
     else
       write_packet("");
   }
 }
 
-int set_breakpoint(pid_t tid, size_t addr, size_t length)
+bool set_breakpoint(pid_t tid, size_t addr, size_t length)
 {
   int i;
   for (i = 0; i < BREAKPOINT_NUMBER; i++)
@@ -466,12 +430,12 @@ int set_breakpoint(pid_t tid, size_t addr, size_t length)
       break;
     }
   if (i == BREAKPOINT_NUMBER)
-    return -1;
+    return false;
   else
-    return 0;
+    return true;
 }
 
-int remove_breakpoint(pid_t tid, size_t addr, size_t length)
+bool remove_breakpoint(pid_t tid, size_t addr, size_t length)
 {
   int i;
   for (i = 0; i < BREAKPOINT_NUMBER; i++)
@@ -482,16 +446,16 @@ int remove_breakpoint(pid_t tid, size_t addr, size_t length)
       break;
     }
   if (i == BREAKPOINT_NUMBER)
-    return -1;
+    return false;
   else
-    return 0;
+    return true;
 }
 
 size_t restore_breakpoint(size_t addr, size_t length, size_t data)
 {
   for (int i = 0; i < BREAKPOINT_NUMBER; i++)
   {
-    int bp_addr = breakpoints[i].addr;
+    size_t bp_addr = breakpoints[i].addr;
     if (bp_addr && bp_addr >= addr && bp_addr < addr + length)
     {
       assert(bp_addr + sizeof(break_instr) <= addr + length);
@@ -552,39 +516,35 @@ void process_packet()
     write_packet("OK");
     break;
   case 'm':
+  {
+    size_t maddr, mlen, mdata;
+    assert(sscanf(payload, "%zx,%zx", &maddr, &mlen) == 2);
+    for (int i = 0; i < mlen; i += 8)
+    {
+      mdata = ptrace(PTRACE_PEEKDATA, threads.curr->tid, maddr + i, NULL);
+      mdata = restore_breakpoint(maddr, sizeof(size_t), mdata);
+      mem2hex((void *)&mdata, tmpbuf + i * 2, (mlen - i >= 8 ? 8 : mlen - i));
+    }
+    tmpbuf[mlen * 2] = '\0';
+    write_packet(tmpbuf);
+    break;
+  }
   case 'M':
   {
     size_t maddr, mlen, mdata;
-    maddr = strtoul(payload, &payload, 16);
-    assert(',' == *payload++);
-    mlen = strtoul(payload, &payload, 16);
-    assert('\0' == *payload++);
-    if (request == 'm')
+    assert(sscanf(payload, "%zx,%zx", &maddr, &mlen) == 2);
+    for (int i = 0; i < mlen; i += 8)
     {
-      for (int i = 0; i < mlen; i += 8)
+      if (mlen - i >= 8)
+        hex2mem(payload + i * 2, (void *)&mdata, 8);
+      else
       {
         mdata = ptrace(PTRACE_PEEKDATA, threads.curr->tid, maddr + i, NULL);
-        mdata = restore_breakpoint(maddr, sizeof(size_t), mdata);
-        mem2hex((void *)&mdata, tmpbuf + i * 2, (mlen - i >= 8 ? 8 : mlen - i));
+        hex2mem(payload + i * 2, (void *)&mdata, mlen - i);
       }
-      tmpbuf[mlen * 2] = '\0';
-      write_packet(tmpbuf);
+      ptrace(PTRACE_POKEDATA, threads.curr->tid, maddr + i, mdata);
     }
-    else
-    {
-      for (int i = 0; i < mlen; i += 8)
-      {
-        if (mlen - i >= 8)
-          hex2mem(payload + i * 2, (void *)&mdata, 8);
-        else
-        {
-          mdata = ptrace(PTRACE_PEEKDATA, threads.curr->tid, maddr + i, NULL);
-          hex2mem(payload + i * 2, (void *)&mdata, mlen - i);
-        }
-        ptrace(PTRACE_POKEDATA, threads.curr->tid, maddr + i, mdata);
-      }
-      write_packet("OK");
-    }
+    write_packet("OK");
     break;
   }
   case 'p':
@@ -628,11 +588,9 @@ void process_packet()
   case 'X':
   {
     size_t maddr, mlen, mdata;
-    int new_len;
-    maddr = strtoul(payload, &payload, 16);
-    assert(',' == *payload++);
-    mlen = strtoul(payload, &payload, 16);
-    assert(':' == *payload++);
+    int offset, new_len;
+    assert(sscanf(payload, "%zx,%zx:%n", &maddr, &mlen, &offset) == 2);
+    payload += offset;
     new_len = unescape(payload, (char *)packetend_ptr - payload);
     assert(new_len == mlen);
     for (int i = 0; i < mlen; i += 8)
@@ -649,23 +607,30 @@ void process_packet()
     write_packet("OK");
     break;
   }
-  case 'z':
   case 'Z':
   {
-    int type = strtol(payload, &payload, 16);
-    assert(',' == *payload++);
-    size_t addr = strtoul(payload, &payload, 16);
-    assert(',' == *payload);
-    payload++;
-    size_t length = strtoul(payload, &payload, 16);
+    size_t type, addr, length;
+    assert(sscanf(payload, "%zx,%zx,%zx", &type, &addr, &length) == 3);
     if (type == 0)
     {
-      int ret;
-      if (request == 'Z')
-        ret = set_breakpoint(threads.curr->tid, addr, length);
+      bool ret = set_breakpoint(threads.curr->tid, addr, length);
+      if (ret)
+        write_packet("OK");
       else
-        ret = remove_breakpoint(threads.curr->tid, addr, length);
-      if (ret == 0)
+        write_packet("E01");
+    }
+    else
+      write_packet("");
+    break;
+  }
+  case 'z':
+  {
+    size_t type, addr, length;
+    assert(sscanf(payload, "%zx,%zx,%zx", &type, &addr, &length) == 3);
+    if (type == 0)
+    {
+      bool ret = remove_breakpoint(threads.curr->tid, addr, length);
+      if (ret)
         write_packet("OK");
       else
         write_packet("E01");
@@ -677,6 +642,9 @@ void process_packet()
   case '?':
     write_packet("S05");
     break;
+  default:
+    printf("Unknown command : %s\n", inbuf);
+    exit(-1);
   }
 
   inbuf_erase_head(packetend + 3);
