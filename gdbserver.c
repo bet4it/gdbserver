@@ -75,12 +75,12 @@ void check_sigtrap()
   ptrace(PTRACE_GETSIGINFO, threads.curr->tid, NULL, &info);
   if (info.si_code == SI_KERNEL && info.si_signo == SIGTRAP)
   {
-    size_t rip = ptrace(PTRACE_PEEKUSER, threads.curr->tid, 8 * RIP, NULL);
-    rip -= sizeof(break_instr);
+    size_t pc = ptrace(PTRACE_PEEKUSER, threads.curr->tid, SZ * PC, NULL);
+    pc -= sizeof(break_instr);
     for (int i = 0; i < BREAKPOINT_NUMBER; i++)
-      if (breakpoints[i].addr == rip)
+      if (breakpoints[i].addr == pc)
       {
-        ptrace(PTRACE_POKEUSER, threads.curr->tid, 8 * RIP, rip);
+        ptrace(PTRACE_POKEUSER, threads.curr->tid, SZ * PC, pc);
         break;
       }
   }
@@ -205,7 +205,7 @@ void process_xfer(const char *name, char *args)
   args = strchr(args, ':');
   *args++ = '\0';
   if (!strcmp(name, "features") && !strcmp(mode, "read"))
-    write_packet("l<target version=\"1.0\"><architecture>i386:x86-64</architecture></target>");
+    write_packet(FEATURE_STR);
   if (!strcmp(name, "auxv") && !strcmp(mode, "read"))
     read_auxv();
   if (!strcmp(name, "exec-file") && !strcmp(mode, "read"))
@@ -279,7 +279,7 @@ void process_query(char *payload)
     write_packet("l");
 }
 
-static int gdb_open_flags_to_system_flags(int64_t flags)
+static int gdb_open_flags_to_system_flags(size_t flags)
 {
   int ret;
   switch (flags & 3)
@@ -298,7 +298,7 @@ static int gdb_open_flags_to_system_flags(int64_t flags)
     return 0;
   }
 
-  assert(!(flags & ~(int64_t)(3 | 0x8 | 0x200 | 0x400 | 0x800)));
+  assert(!(flags & ~(size_t)(3 | 0x8 | 0x200 | 0x400 | 0x800)));
 
   if (flags & 0x8)
     ret |= O_APPEND;
@@ -492,7 +492,7 @@ void process_packet()
     exit(0);
   case 'g':
   {
-    struct user_regs_struct regs;
+    regs_struct regs;
     uint8_t regbuf[20];
     tmpbuf[0] = '\0';
     ptrace(PTRACE_GETREGS, threads.curr->tid, NULL, &regs);
@@ -519,11 +519,11 @@ void process_packet()
   {
     size_t maddr, mlen, mdata;
     assert(sscanf(payload, "%zx,%zx", &maddr, &mlen) == 2);
-    for (int i = 0; i < mlen; i += 8)
+    for (int i = 0; i < mlen; i += SZ)
     {
       mdata = ptrace(PTRACE_PEEKDATA, threads.curr->tid, maddr + i, NULL);
       mdata = restore_breakpoint(maddr, sizeof(size_t), mdata);
-      mem2hex((void *)&mdata, tmpbuf + i * 2, (mlen - i >= 8 ? 8 : mlen - i));
+      mem2hex((void *)&mdata, tmpbuf + i * 2, (mlen - i >= SZ ? SZ : mlen - i));
     }
     tmpbuf[mlen * 2] = '\0';
     write_packet(tmpbuf);
@@ -533,10 +533,10 @@ void process_packet()
   {
     size_t maddr, mlen, mdata;
     assert(sscanf(payload, "%zx,%zx", &maddr, &mlen) == 2);
-    for (int i = 0; i < mlen; i += 8)
+    for (int i = 0; i < mlen; i += SZ)
     {
-      if (mlen - i >= 8)
-        hex2mem(payload + i * 2, (void *)&mdata, 8);
+      if (mlen - i >= SZ)
+        hex2mem(payload + i * 2, (void *)&mdata, SZ);
       else
       {
         mdata = ptrace(PTRACE_PEEKDATA, threads.curr->tid, maddr + i, NULL);
@@ -550,14 +550,24 @@ void process_packet()
   case 'p':
   {
     int i = strtol(payload, NULL, 16);
-    if (i > ARCH_REG_NUM)
+    if (i >= ARCH_REG_NUM && i != EXTRA_NUM)
     {
       write_packet("E01");
       break;
     }
-    size_t regdata = ptrace(PTRACE_PEEKUSER, threads.curr->tid, 8 * regs_map[i].idx, NULL);
-    mem2hex((void *)&regdata, tmpbuf, regs_map[i].size);
-    tmpbuf[regs_map[i].size * 2] = '\0';
+    size_t regdata;
+    if (i == EXTRA_NUM)
+    {
+      regdata = ptrace(PTRACE_PEEKUSER, threads.curr->tid, SZ * EXTRA_REG, NULL);
+      mem2hex((void *)&regdata, tmpbuf, EXTRA_SIZE);
+      tmpbuf[EXTRA_SIZE * 2] = '\0';
+    }
+    else
+    {
+      regdata = ptrace(PTRACE_PEEKUSER, threads.curr->tid, SZ * regs_map[i].idx, NULL);
+      mem2hex((void *)&regdata, tmpbuf, regs_map[i].size);
+      tmpbuf[regs_map[i].size * 2] = '\0';
+    }
     write_packet(tmpbuf);
     break;
   }
@@ -565,17 +575,17 @@ void process_packet()
   {
     int i = strtol(payload, &payload, 16);
     assert('=' == *payload++);
-    if (i > ARCH_REG_NUM && i != 57)
+    if (i >= ARCH_REG_NUM && i != EXTRA_NUM)
     {
       write_packet("E01");
       break;
     }
-    size_t regdata;
-    hex2mem(payload, (void *)&regdata, 8 * 2);
-    if (i == 57)
-      ptrace(PTRACE_POKEUSER, threads.curr->tid, 8 * ORIG_RAX, regdata);
+    size_t regdata = 0;
+    hex2mem(payload, (void *)&regdata, SZ * 2);
+    if (i == EXTRA_NUM)
+      ptrace(PTRACE_POKEUSER, threads.curr->tid, SZ * EXTRA_REG, regdata);
     else
-      ptrace(PTRACE_POKEUSER, threads.curr->tid, 8 * regs_map[i].idx, regdata);
+      ptrace(PTRACE_POKEUSER, threads.curr->tid, SZ * regs_map[i].idx, regdata);
     write_packet("OK");
     break;
   }
@@ -593,10 +603,10 @@ void process_packet()
     payload += offset;
     new_len = unescape(payload, (char *)packetend_ptr - payload);
     assert(new_len == mlen);
-    for (int i = 0; i < mlen; i += 8)
+    for (int i = 0; i < mlen; i += SZ)
     {
-      if (mlen - i >= 8)
-        memcpy((void *)&mdata, payload + i, 8);
+      if (mlen - i >= SZ)
+        memcpy((void *)&mdata, payload + i, SZ);
       else
       {
         mdata = ptrace(PTRACE_PEEKDATA, threads.curr->tid, maddr + i, NULL);
@@ -721,7 +731,11 @@ int main(int argc, char *argv[])
     threads.t[0].pid = threads.t[0].tid = pid;
     threads.t[0].stat = stat;
     threads.len = 1;
-    ptrace(PTRACE_SETOPTIONS, pid, NULL, PTRACE_O_TRACECLONE | PTRACE_O_EXITKILL);
+    int options = PTRACE_O_TRACECLONE;
+#ifdef PTRACE_O_EXITKILL
+    options |= PTRACE_O_EXITKILL;
+#endif
+    ptrace(PTRACE_SETOPTIONS, pid, NULL, options);
   }
   threads.curr = &threads.t[0];
   initialize_async_io(sigint_pid);
