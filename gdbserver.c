@@ -621,7 +621,7 @@ void process_packet()
   {
     size_t type, addr, length;
     assert(sscanf(payload, "%zx,%zx,%zx", &type, &addr, &length) == 3);
-    if (type == 0)
+    if (type == 0 && sizeof(break_instr))
     {
       bool ret = set_breakpoint(threads.curr->tid, addr, length);
       if (ret)

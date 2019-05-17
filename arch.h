@@ -128,4 +128,105 @@ struct reg_struct regs_map[] = {
 
 #endif /* __arm__ */
 
+#ifdef __powerpc__
+
+#define SZ 4
+#define FEATURE_STR "l<target version=\"1.0\">\
+  <architecture>powerpc:common</architecture>\
+  <feature name=\"org.gnu.gdb.power.core\">\
+    <reg name=\"r0\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r1\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r2\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r3\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r4\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r5\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r6\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r7\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r8\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r9\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r10\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r11\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r12\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r13\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r14\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r15\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r16\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r17\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r18\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r19\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r20\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r21\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r22\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r23\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r24\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r25\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r26\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r27\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r28\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r29\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r30\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"r31\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"pc\" bitsize=\"32\" type=\"code_ptr\"/>\
+    <reg name=\"msr\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"orig_r3\" bitsize=\"32\" type=\"int\"/>\
+    <reg name=\"ctr\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"lr\" bitsize=\"32\" type=\"code_ptr\"/>\
+    <reg name=\"xer\" bitsize=\"32\" type=\"uint32\"/>\
+    <reg name=\"cr\" bitsize=\"32\" type=\"uint32\"/>\
+</feature>\
+</target>"
+
+static uint8_t break_instr[] = {};
+
+#define PC 32
+#define EXTRA_NUM -1
+#define EXTRA_REG -1
+#define EXTRA_SIZE -1
+
+typedef struct pt_regs regs_struct;
+
+struct reg_struct regs_map[] = {
+    {0, 4},
+    {1, 4},
+    {2, 4},
+    {3, 4},
+    {4, 4},
+    {5, 4},
+    {6, 4},
+    {7, 4},
+    {8, 4},
+    {9, 4},
+    {10, 4},
+    {11, 4},
+    {12, 4},
+    {13, 4},
+    {14, 4},
+    {15, 4},
+    {16, 4},
+    {17, 4},
+    {18, 4},
+    {19, 4},
+    {20, 4},
+    {21, 4},
+    {22, 4},
+    {23, 4},
+    {24, 4},
+    {25, 4},
+    {26, 4},
+    {27, 4},
+    {28, 4},
+    {29, 4},
+    {30, 4},
+    {31, 4},
+    {32, 4},
+    {33, 4},
+    {34, 4},
+    {35, 4},
+    {36, 4},
+    {37, 4},
+    {38, 4},
+};
+
+#endif /* __powerpc__ */
+
 #endif /* ARCH_H */
