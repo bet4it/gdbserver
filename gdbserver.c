@@ -181,7 +181,7 @@ void prepare_resume_reply(uint8_t *buf, bool cont)
   {
     if (cont)
       stop_threads();
-    sprintf(buf, "T%02xthread:%02x;", gdb_signal_from_host(WSTOPSIG(threads.curr->stat)), threads.curr->tid);
+    sprintf(buf, "T%02xthread:p%02x.%02x;", gdb_signal_from_host(WSTOPSIG(threads.curr->stat)), threads.curr->pid, threads.curr->tid);
   }
   // if (WIFSIGNALED(stat_loc))
   //   sprintf(buf, "T%02x", gdb_signal_from_host(WTERMSIG(stat_loc)));
@@ -228,7 +228,7 @@ void process_query(char *payload)
   name = payload;
   if (!strcmp(name, "C"))
   {
-    snprintf(tmpbuf, sizeof(tmpbuf), "QC%02x", threads.curr->tid);
+    snprintf(tmpbuf, sizeof(tmpbuf), "QCp%02x.%02x", threads.curr->pid, threads.curr->tid);
     write_packet(tmpbuf);
   }
   if (!strcmp(name, "Attached"))
@@ -241,7 +241,7 @@ void process_query(char *payload)
   if (!strcmp(name, "Offsets"))
     write_packet("");
   if (!strcmp(name, "Supported"))
-    write_packet("PacketSize=8000;qXfer:features:read+;qXfer:auxv:read+;qXfer:exec-file:read+");
+    write_packet("PacketSize=8000;qXfer:features:read+;qXfer:auxv:read+;qXfer:exec-file:read+;multiprocess+");
   if (!strcmp(name, "Symbol"))
     write_packet("OK");
   if (name == strstr(name, "ThreadExtraInfo"))
@@ -262,14 +262,14 @@ void process_query(char *payload)
   if (!strcmp(name, "fThreadInfo"))
   {
     struct thread_id_t *ptr = threads.t;
-    uint8_t pid_buf[10];
+    uint8_t pid_buf[20];
     assert(threads.len > 0);
     strcpy(tmpbuf, "m");
     for (int i = 0; i < threads.len; i++, ptr++)
     {
       while (!ptr->tid)
         ptr++;
-      snprintf(pid_buf, sizeof(pid_buf), "%02x,", ptr->tid);
+      snprintf(pid_buf, sizeof(pid_buf), "p%02x.%02x,", ptr->pid, ptr->tid);
       strcat(tmpbuf, pid_buf);
     }
     tmpbuf[strlen(tmpbuf) - 1] = '\0';
@@ -346,7 +346,9 @@ void process_vpacket(char *payload)
     if (args[0] == 's')
     {
       assert(args[1] == ':');
-      pid_t tid = strtol(args + 2, NULL, 16);
+      char *dot = strchr(args, '.');
+      assert(dot);
+      pid_t tid = strtol(dot + 1, NULL, 16);
       set_curr_thread(tid);
       ptrace(PTRACE_SINGLESTEP, threads.curr->tid, NULL, NULL);
       waitpid(threads.curr->tid, &threads.curr->stat, __WALL);
@@ -409,7 +411,12 @@ void process_vpacket(char *payload)
       free(buf);
     }
     else if (operation == strstr(operation, "setfs:"))
+    {
+      char *endptr;
+      int64_t pid = strtol(operation + 6, &endptr, 16);
+      assert(*endptr == 0);
       write_packet("F0");
+    }
     else
       write_packet("");
   }
@@ -509,7 +516,9 @@ void process_packet()
     if ('g' == *payload++)
     {
       pid_t tid;
-      tid = strtol(payload, NULL, 16);
+      char *dot = strchr(payload, '.');
+      assert(dot);
+      tid = strtol(dot, NULL, 16);
       if (tid > 0)
         set_curr_thread(tid);
     }
