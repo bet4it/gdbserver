@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <dirent.h>
 #include <assert.h>
 #include <stdbool.h>
@@ -43,7 +44,7 @@ struct debug_breakpoint_t
   size_t orig_data;
 } breakpoints[BREAKPOINT_NUMBER];
 
-uint8_t tmpbuf[0x4000];
+uint8_t tmpbuf[0x20000];
 bool attach = false;
 
 void sigint_pid()
@@ -528,9 +529,20 @@ void process_packet()
   {
     size_t maddr, mlen, mdata;
     assert(sscanf(payload, "%zx,%zx", &maddr, &mlen) == 2);
+    if (mlen * SZ * 2 > 0x20000)
+    {
+      puts("Buffer overflow!");
+      exit(-1);
+    }
     for (int i = 0; i < mlen; i += SZ)
     {
+      errno = 0;
       mdata = ptrace(PTRACE_PEEKDATA, threads.curr->tid, maddr + i, NULL);
+      if (errno)
+      {
+        sprintf(tmpbuf, "E%02x", errno);
+        break;
+      }
       mdata = restore_breakpoint(maddr, sizeof(size_t), mdata);
       mem2hex((void *)&mdata, tmpbuf + i * 2, (mlen - i >= SZ ? SZ : mlen - i));
     }
@@ -662,8 +674,7 @@ void process_packet()
     write_packet("S05");
     break;
   default:
-    printf("Unknown command : %s\n", inbuf);
-    exit(-1);
+    write_packet("");
   }
 
   inbuf_erase_head(packetend + 3);
