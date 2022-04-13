@@ -308,8 +308,13 @@ void remote_prepare(char *name)
 
     printf("Listening on port %d\n", port);
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr(name);
+    addr.sin_addr.s_addr = *name ? inet_addr(name) : INADDR_ANY;
     addr.sin_port = htons(port);
+
+    if (addr.sin_addr.s_addr == INADDR_NONE) {
+        printf("Bad host argument: %s", name);
+	exit(-1);
+    }
 
     ret = bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr));
     if (ret < 0)
