@@ -738,10 +738,12 @@ int main(int argc, char *argv[])
     pid = fork();
     if (pid == 0)
     {
-      char *prog = *next_arg;
+      char **args = next_arg;
       setpgrp();
       ptrace(PTRACE_TRACEME, 0, NULL, NULL);
-      execl(prog, prog, NULL);
+      execvp(args[0], args);
+      perror(args[0]);
+      _exit(1);
     }
     if (waitpid(pid, &stat, __WALL) < 0)
     {
