@@ -467,11 +467,10 @@ size_t restore_breakpoint(size_t addr, size_t length, size_t data)
     size_t bp_size = sizeof(break_instr);
     if (bp_addr && bp_addr + bp_size > addr && bp_addr < addr + length)
     {
-      size_t i;
-      for (i = 0; i < bp_size; i++)
+      for (size_t j = 0; j < bp_size; j++)
       {
-         if (bp_addr + i >= addr && bp_addr + i < addr + length)
-	   ((uint8_t *)&data)[bp_addr + i - addr] = ((uint8_t *)&breakpoints[i].orig_data)[i];
+         if (bp_addr + j >= addr && bp_addr + j < addr + length)
+	   ((uint8_t *)&data)[bp_addr + j - addr] = ((uint8_t *)&breakpoints[i].orig_data)[j];
       }
     }
   }
