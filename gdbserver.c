@@ -464,10 +464,14 @@ size_t restore_breakpoint(size_t addr, size_t length, size_t data)
   for (int i = 0; i < BREAKPOINT_NUMBER; i++)
   {
     size_t bp_addr = breakpoints[i].addr;
-    if (bp_addr && bp_addr >= addr && bp_addr < addr + length)
+    size_t bp_size = sizeof(break_instr);
+    if (bp_addr && bp_addr + bp_size > addr && bp_addr < addr + length)
     {
-      assert(bp_addr + sizeof(break_instr) <= addr + length);
-      memcpy((uint8_t *)&data + (bp_addr - addr), &breakpoints[i].orig_data, sizeof(break_instr));
+      for (size_t j = 0; j < bp_size; j++)
+      {
+         if (bp_addr + j >= addr && bp_addr + j < addr + length)
+           ((uint8_t *)&data)[bp_addr + j - addr] = ((uint8_t *)&breakpoints[i].orig_data)[j];
+      }
     }
   }
   return data;
