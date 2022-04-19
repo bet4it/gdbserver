@@ -385,7 +385,7 @@ void process_vpacket(char *payload)
       flags = gdb_open_flags_to_system_flags(flags);
       assert((mode & ~(int64_t)0777) == 0);
       fd = open(file_name, flags, mode);
-      sprintf(tmpbuf, "F%d", fd);
+      sprintf(tmpbuf, "F%x", fd);
       write_packet(tmpbuf);
     }
     else if (operation == strstr(operation, "close:"))
@@ -469,8 +469,8 @@ size_t restore_breakpoint(size_t addr, size_t length, size_t data)
     {
       for (size_t j = 0; j < bp_size; j++)
       {
-         if (bp_addr + j >= addr && bp_addr + j < addr + length)
-           ((uint8_t *)&data)[bp_addr + j - addr] = ((uint8_t *)&breakpoints[i].orig_data)[j];
+        if (bp_addr + j >= addr && bp_addr + j < addr + length)
+          ((uint8_t *)&data)[bp_addr + j - addr] = ((uint8_t *)&breakpoints[i].orig_data)[j];
       }
     }
   }
