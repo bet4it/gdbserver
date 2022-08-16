@@ -371,22 +371,23 @@ void process_vpacket(char *payload)
     char *operation = strchr(name, ':') + 1;
     if (operation == strstr(operation, "open:"))
     {
+      char result[10];
       char *parameter = strchr(operation, ':') + 1;
-      char file_name[128], *file_name_end = strchr(parameter, ',');
-      int file_name_len, fd;
+      char *end = strchr(parameter, ',');
+      int len, fd;
       size_t flags, mode;
-      assert(file_name_end != NULL);
-      *file_name_end = 0;
-      assert((file_name_len = strlen(parameter)) < 128);
-      hex2mem(parameter, file_name, file_name_len);
-      file_name[file_name_len / 2] = '\0';
-      parameter += file_name_len + 1;
+      assert(end != NULL);
+      *end = 0;
+      len = strlen(parameter);
+      hex2mem(parameter, tmpbuf, len);
+      tmpbuf[len / 2] = '\0';
+      parameter += len + 1;
       assert(sscanf(parameter, "%zx,%zx", &flags, &mode) == 2);
       flags = gdb_open_flags_to_system_flags(flags);
       assert((mode & ~(int64_t)0777) == 0);
-      fd = open(file_name, flags, mode);
-      sprintf(tmpbuf, "F%x", fd);
-      write_packet(tmpbuf);
+      fd = open(tmpbuf, flags, mode);
+      sprintf(result, "F%x", fd);
+      write_packet(result);
     }
     else if (operation == strstr(operation, "close:"))
     {
@@ -406,7 +407,9 @@ void process_vpacket(char *payload)
         size = PACKET_BUF_SIZE / 2;
       assert(offset >= 0);
       char *buf = malloc(size);
-      int ret = pread(fd, buf, size, offset);
+      FILE *fp = fdopen(fd, "rb");
+      fseek(fp, offset, SEEK_SET);
+      int ret = fread(buf, 1, size, fp);
       sprintf(tmpbuf, "F%x;", ret);
       write_binary_packet(tmpbuf, buf, ret);
       free(buf);
