@@ -49,7 +49,7 @@ bool attach = false;
 
 void sigint_pid()
 {
-  kill(-threads.t[0].pid, SIGINT);
+  kill(threads.t[0].pid, SIGINT);
 }
 
 bool is_clone_event(int status)
